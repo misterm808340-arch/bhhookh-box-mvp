@@ -1,0 +1,148 @@
+import React from 'react';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { COLORS, RADII } from '../theme';
+import { VegMark } from './PrimaryButton';
+import { QtyStepper } from './QtyStepper';
+import type { FoodItem } from '../types';
+
+interface FoodCardProps {
+  item: FoodItem;
+  quantity: number;
+  onAdd: () => void;
+  onIncrement: () => void;
+  onDecrement: () => void;
+}
+
+/** Menu list row: image on the left, details + price + add/stepper on the right. */
+export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: FoodCardProps) {
+  return (
+    <View style={styles.card}>
+      <Image source={item.image} style={styles.image} />
+      <View style={styles.info}>
+        <View style={styles.titleRow}>
+          <VegMark isVeg={item.isVeg} />
+          <Text style={styles.name} numberOfLines={1}>
+            {item.name}
+          </Text>
+        </View>
+        <Text style={styles.description} numberOfLines={2}>
+          {item.description}
+        </Text>
+        <View style={styles.metaRow}>
+          <Ionicons name="star" size={12} color="#F59E0B" />
+          <Text style={styles.meta}>{item.rating.toFixed(1)}</Text>
+          <Text style={styles.dot}>·</Text>
+          <Ionicons name="time-outline" size={12} color={COLORS.textMuted} />
+          <Text style={styles.meta}>{item.prepTime}</Text>
+        </View>
+        <View style={styles.bottomRow}>
+          <Text style={styles.price}>₹{item.price}</Text>
+          {quantity === 0 ? (
+            <Pressable
+              onPress={onAdd}
+              hitSlop={8}
+              style={({ pressed }) => [styles.addButton, pressed && { opacity: 0.85 }]}
+              accessibilityLabel={`Add ${item.name} to cart`}
+            >
+              <Ionicons name="add" size={16} color={COLORS.primaryDark} />
+              <Text style={styles.addLabel}>ADD</Text>
+            </Pressable>
+          ) : (
+            <QtyStepper
+              quantity={quantity}
+              onIncrement={onIncrement}
+              onDecrement={onDecrement}
+            />
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    gap: 12,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADII.lg,
+    padding: 10,
+    marginHorizontal: 16,
+    marginVertical: 6,
+    // Subtle premium shadow
+    shadowColor: '#0B3D2E',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 1,
+  },
+  image: {
+    width: 96,
+    height: 96,
+    borderRadius: RADII.md,
+    backgroundColor: COLORS.surface,
+  },
+  info: {
+    flex: 1,
+    gap: 3,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  name: {
+    flex: 1,
+    fontSize: 15.5,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  description: {
+    fontSize: 12.5,
+    lineHeight: 17,
+    color: COLORS.textMuted,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  meta: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  dot: {
+    color: COLORS.textMuted,
+    fontWeight: '700',
+  },
+  bottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 2,
+  },
+  price: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: COLORS.primary,
+  },
+  addButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: COLORS.lime,
+    borderRadius: RADII.sm,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  addLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.primaryDark,
+    letterSpacing: 0.4,
+  },
+});

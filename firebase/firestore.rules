@@ -1,0 +1,112 @@
+rules_version = '2';
+
+// ============================================================================
+// BHHOOKH BOX — Firestore Security Rules
+// ============================================================================
+// Data model
+//   orders/{orderId}   — created by the CUSTOMER app (no auth required),
+//                        read/updated only by authorized ADMINS.
+//   admins/{email}     — whitelist, managed via the Firebase Console only.
+//
+// Admin authorization: a signed-in user is an admin iff a document exists in
+// the `admins` collection whose document ID equals their auth email exactly.
+//
+// Status workflow enforced on update (mirrors the admin dashboard buttons):
+//   Pending → Accepted → Preparing → Out for Delivery → Delivered
+//   Pending → Rejected   (reject option)
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ───────────────────────── Helper functions ─────────────────────────
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/admins/$(request.auth.token.email));
+    }
+
+    function isSupportedStatus(status) {
+      return status in ['Pending', 'Accepted', 'Preparing', 'Out for Delivery', 'Delivered', 'Rejected'];
+    }
+
+    /**
+     * Order documents created by the customer app.
+     * NOTE: Firestore rules cannot iterate list elements, so per-item prices
+     * cannot be verified against a server-side menu here. Before production
+     * launch, re-validate items + prices against a real menu with a trusted
+     * backend (Cloud Functions), as flagged in the project README.
+     */
+    function isValidOrderCreation(d) {
+      return d.keys().hasAll(['orderId', 'customer', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'status', 'createdAt'])
+        && d.keys().hasOnly(['orderId', 'customer', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'status', 'createdAt'])
+
+        && d.orderId is string
+        && d.orderId.matches('^BHB-[A-Z0-9-]{4,24}$')
+
+        && d.customer is map
+        && d.customer.keys().hasAll(['name', 'phone', 'address'])
+        && d.customer.keys().hasOnly(['name', 'phone', 'address'])
+        && d.customer.name is string
+        && d.customer.name.size() >= 2 && d.customer.name.size() <= 80
+        && d.customer.phone is string
+        && d.customer.phone.matches('^\\d{10}$')
+        && d.customer.address is string
+        && d.customer.address.size() >= 10 && d.customer.address.size() <= 500
+
+        && d.items is list
+        && d.items.size() >= 1 && d.items.size() <= 50
+
+        && d.subtotal is number && d.subtotal > 0 && d.subtotal <= 100000
+        && d.deliveryFee is number && d.deliveryFee >= 0 && d.deliveryFee <= 500
+        && d.total is number && d.total == d.subtotal + d.deliveryFee
+
+        && d.paymentMethod == 'COD'
+        && d.status == 'Pending'
+        && d.createdAt == request.time;
+    }
+
+    /**
+     * Admin status updates may ONLY change `status` + `updatedAt`, and only
+     * along the allowed workflow. Fixes a mis-clicked Reject requires a new
+     * order (or a temporary rule change by the project owner).
+     */
+    function isValidStatusUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && isSupportedStatus(request.resource.data.status)
+        && (
+          (resource.data.status == 'Pending' && request.resource.data.status == 'Accepted')
+          || (resource.data.status == 'Pending' && request.resource.data.status == 'Rejected')
+          || (resource.data.status == 'Accepted' && request.resource.data.status == 'Preparing')
+          || (resource.data.status == 'Preparing' && request.resource.data.status == 'Out for Delivery')
+          || (resource.data.status == 'Out for Delivery' && request.resource.data.status == 'Delivered')
+        );
+    }
+
+    // ─────────────────────────── Collections ────────────────────────────
+
+    match /orders/{orderId} {
+      // Only whitelisted admins can read incoming orders.
+      allow get, list: if isAdmin();
+      // Anyone (the customer app) may create an order — if it is well-formed.
+      allow create: if request.resource.data.orderId == orderId
+        && isValidOrderCreation(request.resource.data);
+      // Only admins may change status, only along the workflow above.
+      allow update: if isAdmin() && isValidStatusUpdate();
+      // Cleanup / refunds handled by admins.
+      allow delete: if isAdmin();
+    }
+
+    // Admin whitelist — managed in the Firebase Console, never writable from clients.
+    // A user can only check whether THEIR OWN email is whitelisted.
+    match /admins/{email} {
+      allow get: if request.auth != null && request.auth.token.email == email;
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // Everything else is denied by default.
+  }
+}

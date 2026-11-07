@@ -1,0 +1,90 @@
+import type { FoodItem } from '../types';
+
+export const CATEGORIES = [
+  'All',
+  'Burgers',
+  'Rolls',
+  'South Indian',
+  'Biryani',
+  'Rice & Bowls',
+  'Beverages',
+] as const;
+
+/**
+ * Sample menu for the MVP. Images are bundled locally so the app works
+ * fully offline until an order is placed (which needs Firestore).
+ */
+export const MENU: FoodItem[] = [
+  {
+    id: 'veg-burger',
+    name: 'Veg Burger',
+    description: 'Crispy golden patty, fresh lettuce, tomato and our signature tangy mayo in a toasted sesame bun.',
+    price: 99,
+    category: 'Burgers',
+    image: require('../../assets/foods/veg-burger.jpg'),
+    isVeg: true,
+    popular: true,
+    rating: 4.5,
+    prepTime: '12 min',
+  },
+  {
+    id: 'paneer-roll',
+    name: 'Paneer Roll',
+    description: 'Spiced paneer, crunchy onions and mint chutney wrapped in a flaky golden paratha.',
+    price: 129,
+    category: 'Rolls',
+    image: require('../../assets/foods/paneer-roll.jpg'),
+    isVeg: true,
+    popular: true,
+    rating: 4.6,
+    prepTime: '15 min',
+  },
+  {
+    id: 'masala-dosa',
+    name: 'Masala Dosa',
+    description: 'Golden crisp dosa stuffed with classic potato masala, served with sambar and coconut chutney.',
+    price: 119,
+    category: 'South Indian',
+    image: require('../../assets/foods/masala-dosa.jpg'),
+    isVeg: true,
+    popular: true,
+    rating: 4.7,
+    prepTime: '18 min',
+  },
+  {
+    id: 'chicken-biryani',
+    name: 'Chicken Biryani',
+    description: 'Fragrant basmati layered with tender chicken, saffron and hand-ground spices, served with raita.',
+    price: 199,
+    category: 'Biryani',
+    image: require('../../assets/foods/chicken-biryani.jpg'),
+    isVeg: false,
+    popular: true,
+    rating: 4.8,
+    prepTime: '25 min',
+  },
+  {
+    id: 'chole-rice',
+    name: 'Chole Rice',
+    description: 'Slow-cooked Punjabi chole over steamed rice, finished with lemon and onion salad.',
+    price: 109,
+    category: 'Rice & Bowls',
+    image: require('../../assets/foods/chole-rice.jpg'),
+    isVeg: true,
+    popular: false,
+    rating: 4.4,
+    prepTime: '15 min',
+  },
+  {
+    id: 'cold-coffee',
+    name: 'Cold Coffee',
+    description: 'Creamy hand-blended cold coffee topped with a thick, frothy foam layer.',
+    price: 89,
+    category: 'Beverages',
+    image: require('../../assets/foods/cold-coffee.jpg'),
+    isVeg: true,
+    popular: true,
+    rating: 4.5,
+    prepTime: '8 min',
+  },
+];
