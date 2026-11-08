@@ -8,12 +8,12 @@ expo-env.d.ts
 *.p8
 *.p12
 *.key
+*.keystore
+!android/app/debug.keystore
 *.mobileprovision
 .env
 .env.local
 npm-debug.*
 yarn-debug.*
 yarn-error.*
-android/
-ios/
 .DS_Store

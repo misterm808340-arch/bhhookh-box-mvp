@@ -35,6 +35,20 @@ bhhookh-box-mvp/
 
 ---
 
+## Released app artifacts (v1.0.0)
+
+Ready-made customer-app builds are attached to the GitHub Release:
+[github.com/misterm808340-arch/bhhookh-box-mvp/releases/tag/v1.0.0](https://github.com/misterm808340-arch/bhhookh-box-mvp/releases/tag/v1.0.0)
+
+| File | Use |
+| --- | --- |
+| `BHHOOKH-BOX-customer-v1.0.0.apk` | Direct install on any Android 7.0+ phone |
+| `BHHOOKH-BOX-customer-v1.0.0.aab` | Upload to Google Play Console |
+
+The `android/` native project used for this build is committed under
+`customer-android/android/`. Signing properties and the release keystore are
+intentionally **not** committed — see `customer-android/BUILD-RELEASE.md`.
+
 ## 1. Create the Firebase project (one project for BOTH apps)
 
 1. Go to <https://console.firebase.google.com> → **Add project** → name it (e.g. `bhhookh-box`) → continue (Analytics optional).
