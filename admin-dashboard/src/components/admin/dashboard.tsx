@@ -8,6 +8,7 @@ import {
   Clock,
   Flame,
   IndianRupee,
+  LayoutGrid,
   LogOut,
   PackageCheck,
   ReceiptText,
@@ -22,6 +23,9 @@ import { formatINR, type Order } from "@/lib/orders";
 import { StatCard } from "./stat-card";
 import { NewOrderBanner, type NewOrderAlertData } from "./new-order-banner";
 import { OrdersBoard } from "./orders-board";
+import { MenuSection } from "./menu-section";
+
+type DashboardTab = "orders" | "menu";
 
 const SOUND_STORAGE_KEY = "bhb-admin-sound-enabled";
 
@@ -33,6 +37,7 @@ interface DashboardProps {
 export function AdminDashboard({ userEmail, onSignOut }: DashboardProps) {
   const [soundOn, setSoundOn] = useState(false);
   const [newAlert, setNewAlert] = useState<NewOrderAlertData | null>(null);
+  const [tab, setTab] = useState<DashboardTab>("orders");
   const soundRef = useRef(false);
   const { toast } = useToast();
 
@@ -105,6 +110,30 @@ export function AdminDashboard({ userEmail, onSignOut }: DashboardProps) {
             Live · Firestore
           </span>
 
+          {/* Section switcher: live orders ↔ menu catalogue */}
+          <div className="flex rounded-full border border-input bg-white p-0.5">
+            <button
+              type="button"
+              onClick={() => setTab("orders")}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold transition-colors ${
+                tab === "orders" ? "bg-brand text-white" : "text-muted-foreground hover:text-brand"
+              }`}
+            >
+              <ReceiptText className="h-3.5 w-3.5" />
+              Orders
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("menu")}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold transition-colors ${
+                tab === "menu" ? "bg-brand text-white" : "text-muted-foreground hover:text-brand"
+              }`}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+              Menu
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={toggleSound}
@@ -142,6 +171,8 @@ export function AdminDashboard({ userEmail, onSignOut }: DashboardProps) {
           <NewOrderBanner alert={newAlert} onDismiss={() => setNewAlert(null)} />
         )}
 
+        {tab === "orders" ? (
+          <>
         {/* Overview stats */}
         <section aria-label="Overview" className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
           <StatCard label="Total Orders" value={stats.total} icon={ReceiptText} chipClass="bg-brand text-white" />
@@ -182,6 +213,10 @@ export function AdminDashboard({ userEmail, onSignOut }: DashboardProps) {
             onUpdateStatus={updateOrderStatus}
           />
         </section>
+          </>
+        ) : (
+          <MenuSection />
+        )}
       </main>
 
       <footer className="border-t bg-white">

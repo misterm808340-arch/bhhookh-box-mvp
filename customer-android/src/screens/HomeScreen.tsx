@@ -1,13 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { BRAND_NAME, BRAND_TAGLINE } from '../config';
-import { CATEGORIES, MENU } from '../data/menu';
+import { useCatalog } from '../context/CatalogContext';
 import { useCart } from '../context/CartContext';
 import { SearchBar } from '../components/SearchBar';
-import { CategoryChips } from '../components/CategoryChips';
+import { CategoryGrid } from '../components/CategoryGrid';
 import { FoodCard } from '../components/FoodCard';
 import { PopularCard } from '../components/PopularCard';
 import { CartBar } from '../components/CartBar';
@@ -19,33 +19,44 @@ type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
 export function HomeScreen({ navigation }: HomeScreenProps) {
   const { quantityOf, addItem, increment, decrement } = useCart();
+  const { categories, products, loading, error } = useCatalog();
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState<string>('All');
+  /** null = All categories. */
+  const [categoryId, setCategoryId] = useState<string | null>(null);
 
   const query = search.trim().toLowerCase();
+  const selectedCategory = categories.find((category) => category.id === categoryId) ?? null;
+
+  /** Live product count per category (admin-managed Firestore data). */
+  const counts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const product of products) {
+      map.set(product.categoryId, (map.get(product.categoryId) ?? 0) + 1);
+    }
+    return map;
+  }, [products]);
 
   const filteredItems = useMemo(
     () =>
-      MENU.filter((item) => {
-        const matchesCategory = category === 'All' || item.category === category;
+      products.filter((item) => {
+        const matchesCategory = categoryId === null || item.categoryId === categoryId;
         const matchesQuery =
           query.length === 0 ||
           item.name.toLowerCase().includes(query) ||
           item.description.toLowerCase().includes(query);
         return matchesCategory && matchesQuery;
       }),
-    [category, query]
+    [products, categoryId, query]
   );
 
   const popularItems = useMemo(
     () =>
-      MENU.filter(
+      filteredItems.filter(
         (item) =>
           item.popular &&
-          (category === 'All' || item.category === category) &&
           (query.length === 0 || item.name.toLowerCase().includes(query))
       ),
-    [category, query]
+    [filteredItems, query]
   );
 
   const openCart = () => navigation.navigate('Cart');
@@ -80,11 +91,30 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
           <SearchBar value={search} onChangeText={setSearch} />
         </View>
 
-        <View style={styles.chipsWrap}>
-          <CategoryChips categories={CATEGORIES} selected={category} onSelect={setCategory} />
-        </View>
+        {/* Categories — live from Firestore, disabled ones are never returned */}
+        {loading ? (
+          <View style={styles.stateBox}>
+            <ActivityIndicator color={COLORS.limeDeep} />
+            <Text style={styles.stateText}>Loading fresh menu…</Text>
+          </View>
+        ) : error ? (
+          <View style={styles.stateBox}>
+            <Ionicons name="cloud-offline-outline" size={36} color={COLORS.limeDeep} />
+            <Text style={styles.stateTitle}>Menu unavailable</Text>
+            <Text style={styles.stateText}>{error}</Text>
+          </View>
+        ) : (
+          <View style={styles.gridWrap}>
+            <CategoryGrid
+              categories={categories}
+              selected={categoryId}
+              counts={counts}
+              onSelect={setCategoryId}
+            />
+          </View>
+        )}
 
-        {popularItems.length > 0 && (
+        {!loading && !error && popularItems.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitleInline}>
@@ -107,27 +137,40 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
           </View>
         )}
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitleStandalone}>All Items</Text>
-          {filteredItems.length === 0 ? (
-            <View style={styles.empty}>
-              <Ionicons name="sad-outline" size={40} color={COLORS.limeDeep} />
-              <Text style={styles.emptyTitle}>No dishes found</Text>
-              <Text style={styles.emptyText}>Try a different search or category.</Text>
-            </View>
-          ) : (
-            filteredItems.map((item) => (
-              <FoodCard
-                key={item.id}
-                item={item}
-                quantity={quantityOf(item.id)}
-                onAdd={() => addItem(item)}
-                onIncrement={() => increment(item.id)}
-                onDecrement={() => decrement(item.id)}
-              />
-            ))
-          )}
-        </View>
+        {!loading && !error && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitleStandalone}>
+              {selectedCategory ? selectedCategory.name : 'All Items'}
+              <Text style={styles.sectionCount}> · {filteredItems.length}</Text>
+            </Text>
+            {categories.length === 0 ? (
+              <View style={styles.empty}>
+                <Ionicons name="restaurant-outline" size={40} color={COLORS.limeDeep} />
+                <Text style={styles.emptyTitle}>Menu coming soon</Text>
+                <Text style={styles.emptyText}>
+                  Our kitchen is setting up the menu. Please check back shortly.
+                </Text>
+              </View>
+            ) : filteredItems.length === 0 ? (
+              <View style={styles.empty}>
+                <Ionicons name="sad-outline" size={40} color={COLORS.limeDeep} />
+                <Text style={styles.emptyTitle}>No dishes found</Text>
+                <Text style={styles.emptyText}>Try a different search or category.</Text>
+              </View>
+            ) : (
+              filteredItems.map((item) => (
+                <FoodCard
+                  key={item.id}
+                  item={item}
+                  quantity={quantityOf(item.id)}
+                  onAdd={() => addItem(item)}
+                  onIncrement={() => increment(item.id)}
+                  onDecrement={() => decrement(item.id)}
+                />
+              ))
+            )}
+          </View>
+        )}
       </ScrollView>
 
       <CartBar onPress={openCart} />
@@ -222,8 +265,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 14,
   },
-  chipsWrap: {
+  gridWrap: {
     marginTop: 14,
+  },
+  stateBox: {
+    marginTop: 18,
+    marginHorizontal: 16,
+    borderWidth: 1.4,
+    borderStyle: 'dashed',
+    borderColor: COLORS.border,
+    borderRadius: 18,
+    paddingVertical: 34,
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: COLORS.surface,
+  },
+  stateTitle: {
+    fontSize: 15.5,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  stateText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    paddingHorizontal: 20,
   },
   section: {
     marginTop: 18,
@@ -247,6 +313,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: COLORS.text,
     marginBottom: 8,
+  },
+  sectionCount: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
   },
   liveDotWrap: {
     flexDirection: 'row',

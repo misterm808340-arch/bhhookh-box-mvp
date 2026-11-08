@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { CartProvider } from './src/context/CartContext';
+import { CatalogProvider } from './src/context/CatalogContext';
 import { readFirebaseConfig } from './src/lib/firebase';
 import { ConfigErrorScreen } from './src/screens/ConfigErrorScreen';
 import { HomeScreen } from './src/screens/HomeScreen';
@@ -42,24 +43,26 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <CartProvider>
-        <NavigationContainer theme={navigationTheme}>
-          <StatusBar style="dark" />
-          <Stack.Navigator
-            initialRouteName="Home"
-            screenOptions={{ headerShown: false, animation: 'slide_from_right' }}
-          >
-            <Stack.Screen name="Home" component={HomeScreen} />
-            <Stack.Screen name="Cart" component={CartScreen} />
-            <Stack.Screen name="Checkout" component={CheckoutScreen} />
-            <Stack.Screen
-              name="OrderSuccess"
-              component={OrderSuccessScreen}
-              options={{ animation: 'fade' }}
-            />
-          </Stack.Navigator>
-        </NavigationContainer>
-      </CartProvider>
+      <CatalogProvider>
+        <CartProvider>
+          <NavigationContainer theme={navigationTheme}>
+            <StatusBar style="dark" />
+            <Stack.Navigator
+              initialRouteName="Home"
+              screenOptions={{ headerShown: false, animation: 'slide_from_right' }}
+            >
+              <Stack.Screen name="Home" component={HomeScreen} />
+              <Stack.Screen name="Cart" component={CartScreen} />
+              <Stack.Screen name="Checkout" component={CheckoutScreen} />
+              <Stack.Screen
+                name="OrderSuccess"
+                component={OrderSuccessScreen}
+                options={{ animation: 'fade' }}
+              />
+            </Stack.Navigator>
+          </NavigationContainer>
+        </CartProvider>
+      </CatalogProvider>
     </SafeAreaProvider>
   );
 }

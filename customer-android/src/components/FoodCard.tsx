@@ -1,9 +1,11 @@
 import React from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RADII } from '../theme';
 import { VegMark } from './PrimaryButton';
 import { QtyStepper } from './QtyStepper';
+import { FoodImage, safeIconName } from './FoodImage';
+import { discountPercent } from '../lib/catalog';
 import type { FoodItem } from '../types';
 
 interface FoodCardProps {
@@ -16,15 +18,22 @@ interface FoodCardProps {
 
 /** Menu list row: image on the left, details + price + add/stepper on the right. */
 export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: FoodCardProps) {
+  const off = discountPercent(item.price, item.mrp);
   return (
     <View style={styles.card}>
-      <Image source={item.image} style={styles.image} />
+      <FoodImage
+        uri={item.imageUrl}
+        icon={item.imageUrl ? item.categoryIcon : safeIconName(item.categoryIcon)}
+        style={styles.image}
+        iconSize={30}
+      />
       <View style={styles.info}>
         <View style={styles.titleRow}>
           <VegMark isVeg={item.isVeg} />
           <Text style={styles.name} numberOfLines={1}>
             {item.name}
           </Text>
+          {item.popular ? <Ionicons name="flame" size={13} color="#F59E0B" /> : null}
         </View>
         <Text style={styles.description} numberOfLines={2}>
           {item.description}
@@ -37,7 +46,17 @@ export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: Fo
           <Text style={styles.meta}>{item.prepTime}</Text>
         </View>
         <View style={styles.bottomRow}>
-          <Text style={styles.price}>₹{item.price}</Text>
+          <View style={styles.priceRow}>
+            <Text style={styles.price}>₹{item.price}</Text>
+            {off !== null ? (
+              <>
+                <Text style={styles.mrp}>₹{item.mrp}</Text>
+                <View style={styles.offBadge}>
+                  <Text style={styles.offText}>{off}% OFF</Text>
+                </View>
+              </>
+            ) : null}
+          </View>
           {quantity === 0 ? (
             <Pressable
               onPress={onAdd}
@@ -84,6 +103,29 @@ const styles = StyleSheet.create({
     height: 96,
     borderRadius: RADII.md,
     backgroundColor: COLORS.surface,
+  },
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+  },
+  mrp: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    textDecorationLine: 'line-through',
+  },
+  offBadge: {
+    backgroundColor: COLORS.lime,
+    borderRadius: RADII.pill,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  offText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: COLORS.primaryDark,
   },
   info: {
     flex: 1,

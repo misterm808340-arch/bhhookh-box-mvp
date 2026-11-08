@@ -1,8 +1,10 @@
 import React from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RADII } from '../theme';
 import { VegMark } from './PrimaryButton';
+import { FoodImage } from './FoodImage';
+import { discountPercent } from '../lib/catalog';
 import type { FoodItem } from '../types';
 
 interface PopularCardProps {
@@ -12,14 +14,21 @@ interface PopularCardProps {
 
 /** Horizontal "popular near you" card. */
 export function PopularCard({ item, onAdd }: PopularCardProps) {
+  const off = discountPercent(item.price, item.mrp);
   return (
     <View style={styles.card}>
-      <Image source={item.image} style={styles.image} />
+      <FoodImage uri={item.imageUrl} icon={item.categoryIcon} style={styles.image} iconSize={30} />
       <View style={styles.badgeRow}>
-        <View style={styles.ratingBadge}>
-          <Ionicons name="star" size={10} color={COLORS.white} />
-          <Text style={styles.ratingText}>{item.rating.toFixed(1)}</Text>
-        </View>
+        {off !== null ? (
+          <View style={styles.offBadge}>
+            <Text style={styles.offText}>{off}% OFF</Text>
+          </View>
+        ) : (
+          <View style={styles.ratingBadge}>
+            <Ionicons name="star" size={10} color={COLORS.white} />
+            <Text style={styles.ratingText}>{item.rating.toFixed(1)}</Text>
+          </View>
+        )}
       </View>
       <Pressable
         onPress={onAdd}
@@ -36,7 +45,10 @@ export function PopularCard({ item, onAdd }: PopularCardProps) {
             {item.name}
           </Text>
         </View>
-        <Text style={styles.price}>₹{item.price}</Text>
+        <View style={styles.priceRow}>
+          <Text style={styles.price}>₹{item.price}</Text>
+          {item.mrp !== null ? <Text style={styles.mrp}>₹{item.mrp}</Text> : null}
+        </View>
       </View>
     </View>
   );
@@ -83,6 +95,28 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 10.5,
     fontWeight: '800',
+  },
+  offBadge: {
+    backgroundColor: COLORS.lime,
+    borderRadius: RADII.pill,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  offText: {
+    color: COLORS.primaryDark,
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  mrp: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    textDecorationLine: 'line-through',
   },
   addButton: {
     position: 'absolute',

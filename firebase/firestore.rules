@@ -4,16 +4,27 @@ rules_version = '2';
 // BHHOOKH BOX — Firestore Security Rules
 // ============================================================================
 // Data model
-//   orders/{orderId}   — created by the CUSTOMER app (no auth required),
-//                        read/updated only by authorized ADMINS.
-//   admins/{email}     — whitelist, managed via the Firebase Console only.
+//   orders/{orderId}      — created by the CUSTOMER app (no auth required),
+//                           read/updated only by authorized ADMINS.
+//   categories/{id}       — menu categories. Public read (customers render
+//                           enabled ones), admin-only write.
+//   products/{id}         — menu products, every product carries categoryId.
+//                           Public read (customers render available ones),
+//                           admin-only write.
+//   admins/{email}        — whitelist, managed via the Firebase Console only.
 //
 // Admin authorization: a signed-in user is an admin iff a document exists in
 // the `admins` collection whose document ID equals their auth email exactly.
 //
-// Status workflow enforced on update (mirrors the admin dashboard buttons):
+// Order status workflow enforced on update (mirrors the admin dashboard):
 //   Pending → Accepted → Preparing → Out for Delivery → Delivered
 //   Pending → Rejected   (reject option)
+//
+// Price validation: products (and therefore prices) can only be written by
+// admins. The customer app re-reads each product at checkout and rebuilds the
+// order payload from the FRESH Firestore price + availability before creating
+// the order (see customer src/lib/orders.ts → placeOrder). Full per-item
+// price re-checks inside the write path require a Cloud Function (Blaze plan).
 // ============================================================================
 
 service cloud.firestore {
@@ -31,12 +42,15 @@ service cloud.firestore {
       return status in ['Pending', 'Accepted', 'Preparing', 'Out for Delivery', 'Delivered', 'Rejected'];
     }
 
+    function validUrlOrNull(value) {
+      return value is string && value.matches('^https://[^ ]{1,1000}$');
+    }
+
     /**
      * Order documents created by the customer app.
      * NOTE: Firestore rules cannot iterate list elements, so per-item prices
-     * cannot be verified against a server-side menu here. Before production
-     * launch, re-validate items + prices against a real menu with a trusted
-     * backend (Cloud Functions), as flagged in the project README.
+     * cannot be verified here — that is handled by the app re-reading fresh
+     * product data at checkout and (optionally, later) a Cloud Function.
      */
     function isValidOrderCreation(d) {
       return d.keys().hasAll(['orderId', 'customer', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'status', 'createdAt'])
@@ -85,6 +99,46 @@ service cloud.firestore {
         );
     }
 
+    // ─────────────────────── Catalogue validation ───────────────────────
+
+    function isValidCategoryWrite(d, isNew) {
+      return d.keys().hasAll(['name', 'icon', 'enabled', 'sortOrder', 'updatedAt'])
+        && d.keys().hasOnly(['name', 'icon', 'emoji', 'imageUrl', 'enabled', 'sortOrder', 'createdAt', 'updatedAt'])
+
+        && d.name is string && d.name.size() >= 2 && d.name.size() <= 40
+        && d.icon is string && d.icon.size() >= 1 && d.icon.size() <= 40
+        && d.enabled is bool
+        && d.sortOrder is int && d.sortOrder >= 0 && d.sortOrder <= 9999
+
+        && (!d.keys().hasAny(['emoji']) || (d.emoji is string && d.emoji.size() <= 8))
+        && (!d.keys().hasAny(['imageUrl']) || validUrlOrNull(d.imageUrl))
+
+        && d.updatedAt == request.time
+        && (isNew ? d.createdAt == request.time : d.createdAt == resource.data.createdAt);
+    }
+
+    function isValidProductWrite(d, isNew) {
+      return d.keys().hasAll(['name', 'description', 'categoryId', 'price', 'isVeg', 'popular', 'available', 'sortOrder', 'updatedAt'])
+        && d.keys().hasOnly(['name', 'description', 'categoryId', 'categoryName', 'price', 'mrp', 'imageUrl', 'isVeg', 'popular', 'available', 'sortOrder', 'rating', 'prepTime', 'createdAt', 'updatedAt'])
+
+        && d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+        && d.description is string && d.description.size() <= 500
+        && d.categoryId is string && d.categoryId.matches('^[a-zA-Z0-9_-]{1,60}$')
+        && d.price is number && d.price >= 1 && d.price <= 100000
+        && d.price is int
+        && d.isVeg is bool && d.popular is bool && d.available is bool
+        && d.sortOrder is int && d.sortOrder >= 0 && d.sortOrder <= 9999
+
+        && (!d.keys().hasAny(['categoryName']) || (d.categoryName is string && d.categoryName.size() <= 40))
+        && (!d.keys().hasAny(['mrp']) || (d.mrp is number && d.mrp >= d.price && d.mrp <= 200000))
+        && (!d.keys().hasAny(['imageUrl']) || validUrlOrNull(d.imageUrl))
+        && (!d.keys().hasAny(['rating']) || (d.rating is number && d.rating >= 0 && d.rating <= 5))
+        && (!d.keys().hasAny(['prepTime']) || (d.prepTime is string && d.prepTime.size() <= 24))
+
+        && d.updatedAt == request.time
+        && (isNew ? d.createdAt == request.time : d.createdAt == resource.data.createdAt);
+    }
+
     // ─────────────────────────── Collections ────────────────────────────
 
     match /orders/{orderId} {
@@ -96,6 +150,27 @@ service cloud.firestore {
       // Only admins may change status, only along the workflow above.
       allow update: if isAdmin() && isValidStatusUpdate();
       // Cleanup / refunds handled by admins.
+      allow delete: if isAdmin();
+    }
+
+    // Menu categories — public read (the app queries enabled ones),
+    // admin-only modifications.
+    match /categories/{categoryId} {
+      allow get, list: if true;
+      allow create: if isAdmin() && isValidCategoryWrite(request.resource.data, true);
+      allow update: if isAdmin() && isValidCategoryWrite(request.resource.data, false);
+      allow delete: if isAdmin();
+    }
+
+    // Menu products — public read (the app queries available ones),
+    // admin-only modifications. Every product must carry a categoryId.
+    match /products/{productId} {
+      allow get, list: if true;
+      allow create: if isAdmin()
+        && request.resource.data.categoryId is string
+        && request.resource.data.categoryId.size() >= 1
+        && isValidProductWrite(request.resource.data, true);
+      allow update: if isAdmin() && isValidProductWrite(request.resource.data, false);
       allow delete: if isAdmin();
     }
 

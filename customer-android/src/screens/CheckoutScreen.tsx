@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { useCart } from '../context/CartContext';
-import { placeOrder, validateCheckout, type CheckoutErrors } from '../lib/orders';
+import { placeOrder, validateCheckout, OrderValidationError, type CheckoutErrors } from '../lib/orders';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { COLORS, RADII } from '../theme';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -49,7 +49,9 @@ export function CheckoutScreen({ navigation }: CheckoutScreenProps) {
       console.error('Order placement failed:', error);
       Alert.alert(
         'Order Failed',
-        'We could not reach the kitchen. Please check your internet connection and try again.',
+        error instanceof OrderValidationError
+          ? error.message
+          : 'We could not reach the kitchen. Please check your internet connection and try again.',
         [{ text: 'OK' }]
       );
     } finally {
