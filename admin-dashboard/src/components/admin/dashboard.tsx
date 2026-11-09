@@ -27,6 +27,7 @@ import { OrdersBoard } from "./orders-board";
 import { MenuSection } from "./menu-section";
 import { DriversManager } from "./drivers-manager";
 import { Reports } from "./reports";
+import { DeliverySettingsCard } from "./delivery-settings";
 
 type DashboardTab = "orders" | "menu" | "drivers" | "reports";
 
@@ -209,8 +210,9 @@ export function AdminDashboard({ userEmail, onSignOut }: DashboardProps) {
           <StatCard label="Cancelled" value={stats.cancelled} icon={CircleX} chipClass="bg-slate-100 text-slate-600" />
         </section>
 
-        {/* Live orders */}
+        {/* Delivery fee + live orders */}
         <section aria-label="Orders" className="space-y-4">
+          <DeliverySettingsCard />
           <div className="flex items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold text-brand">Live Orders</h2>

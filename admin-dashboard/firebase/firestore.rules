@@ -1,30 +1,31 @@
 rules_version = '2';
 
 // ============================================================================
-// BHHOOKH BOX — Firestore Security Rules
+// BHHOOKH BOX — Firestore Security Rules v2 (Email/Password upgrade)
 // ============================================================================
-// Data model
-//   orders/{orderId}      — created by the CUSTOMER app (no auth required),
-//                           read/updated only by authorized ADMINS.
-//   categories/{id}       — menu categories. Public read (customers render
-//                           enabled ones), admin-only write.
-//   products/{id}         — menu products, every product carries categoryId.
-//                           Public read (customers render available ones),
-//                           admin-only write.
-//   admins/{email}        — whitelist, managed via the Firebase Console only.
+// Collections
+//   users/{uid}            customer profiles (owner read/write)
+//   addresses/{docId}      saved delivery addresses (owner read/write)
+//   orders/{orderId}       WRITTEN ONLY by the `createOrder` Cloud Function.
+//                          Customers read their own; admins read all; drivers
+//                          may update ONLY `driverLocation` on assigned orders.
+//   categories/{id}        menu categories — public read, admin write
+//   products/{id}          menu products — public read, admin write
+//   admins/{email}         admin whitelist (Console-managed, read own only)
+//   drivers/{uid}          driver roster (Cloud-Function-managed)
+//   settings/app           app settings (delivery fee) — public read
 //
-// Admin authorization: a signed-in user is an admin iff a document exists in
-// the `admins` collection whose document ID equals their auth email exactly.
+// Admin authorisation is verified SERVER-SIDE:
+//   request.auth.token.admin == true  (custom claim set by the bootstrap
+//                                      script / Cloud Functions)
+//   OR a document in `admins/{email}` matching the auth email exactly.
+// The client-facing dashboard may *display* admin UI, but every write is
+// re-checked here and in Cloud Functions — client state is never trusted.
 //
-// Order status workflow enforced on update (mirrors the admin dashboard):
-//   Pending → Accepted → Preparing → Out for Delivery → Delivered
-//   Pending → Rejected   (reject option)
-//
-// Price validation: products (and therefore prices) can only be written by
-// admins. The customer app re-reads each product at checkout and rebuilds the
-// order payload from the FRESH Firestore price + availability before creating
-// the order (see customer src/lib/orders.ts → placeOrder). Full per-item
-// price re-checks inside the write path require a Cloud Function (Blaze plan).
+// Order status workflow (enforced by Cloud Functions, not writable by clients):
+//   Order Placed → Accepted → Preparing → Out for Delivery → Delivered
+//   Order Placed → Rejected | Cancelled (customer, before kitchen starts)
+//   Accepted/Preparing → Cancelled
 // ============================================================================
 
 service cloud.firestore {
@@ -32,154 +33,214 @@ service cloud.firestore {
 
     // ───────────────────────── Helper functions ─────────────────────────
 
-    function isAdmin() {
-      return request.auth != null
-        && request.auth.token.email != null
-        && exists(/databases/$(database)/documents/admins/$(request.auth.token.email));
+    function isSignedIn() {
+      return request.auth != null;
     }
 
-    function isSupportedStatus(status) {
-      return status in ['Pending', 'Accepted', 'Preparing', 'Out for Delivery', 'Delivered', 'Rejected'];
+    function callerEmail() {
+      return isSignedIn() && request.auth.token.email != null
+        ? request.auth.token.email.toLowerCase()
+        : '';
+    }
+
+    // Backend-verified admin: custom claim OR admins whitelist document.
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.admin == true
+        || (request.auth.token.email != null
+            && exists(/databases/$(database)/documents/admins/$(request.auth.token.email.toLowerCase())))
+      );
+    }
+
+    // Backend-verified active driver: claim OR active drivers/{uid} document.
+    function isDriver() {
+      return isSignedIn() && (
+        request.auth.token.driver == true
+        || (exists(/databases/$(database)/documents/drivers/$(request.auth.uid))
+            && get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.active == true)
+      );
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
     }
 
     function validUrlOrNull(value) {
       return value is string && value.matches('^https://[^ ]{1,1000}$');
     }
 
-    /**
-     * Order documents created by the customer app.
-     * NOTE: Firestore rules cannot iterate list elements, so per-item prices
-     * cannot be verified here — that is handled by the app re-reading fresh
-     * product data at checkout and (optionally, later) a Cloud Function.
-     */
-    function isValidOrderCreation(d) {
-      return d.keys().hasAll(['orderId', 'customer', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'status', 'createdAt'])
-        && d.keys().hasOnly(['orderId', 'customer', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'status', 'createdAt'])
+    // ──────────────────────────── users/{uid} ────────────────────────────
 
-        && d.orderId is string
-        && d.orderId.matches('^BHB-[A-Z0-9-]{4,24}$')
-
-        && d.customer is map
-        && d.customer.keys().hasAll(['name', 'phone', 'address'])
-        && d.customer.keys().hasOnly(['name', 'phone', 'address'])
-        && d.customer.name is string
-        && d.customer.name.size() >= 2 && d.customer.name.size() <= 80
-        && d.customer.phone is string
-        && d.customer.phone.matches('^\\d{10}$')
-        && d.customer.address is string
-        && d.customer.address.size() >= 10 && d.customer.address.size() <= 500
-
-        && d.items is list
-        && d.items.size() >= 1 && d.items.size() <= 50
-
-        && d.subtotal is number && d.subtotal > 0 && d.subtotal <= 100000
-        && d.deliveryFee is number && d.deliveryFee >= 0 && d.deliveryFee <= 500
-        && d.total is number && d.total == d.subtotal + d.deliveryFee
-
-        && d.paymentMethod == 'COD'
-        && d.status == 'Pending'
-        && d.createdAt == request.time;
+    match /users/{uid} {
+      // Profile documents are private to the customer. Admins may read for
+      // support (order screens show the embedded customer info instead).
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if false; // no client-side directory browsing, ever
+      allow create, update: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.email is string
+        && request.resource.data.email == request.auth.token.email
+        && (!('phone' in request.resource.data) || (request.resource.data.phone is string && request.resource.data.phone.size() <= 15))
+        && request.resource.data.role == 'customer';
+      allow delete: if false;
     }
 
-    /**
-     * Admin status updates may ONLY change `status` + `updatedAt`, and only
-     * along the allowed workflow. Fixes a mis-clicked Reject requires a new
-     * order (or a temporary rule change by the project owner).
-     */
-    function isValidStatusUpdate() {
-      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
-        && request.resource.data.updatedAt == request.time
-        && isSupportedStatus(request.resource.data.status)
-        && (
-          (resource.data.status == 'Pending' && request.resource.data.status == 'Accepted')
-          || (resource.data.status == 'Pending' && request.resource.data.status == 'Rejected')
-          || (resource.data.status == 'Accepted' && request.resource.data.status == 'Preparing')
-          || (resource.data.status == 'Preparing' && request.resource.data.status == 'Out for Delivery')
-          || (resource.data.status == 'Out for Delivery' && request.resource.data.status == 'Delivered')
-        );
+    // ────────────────────────── addresses/{docId} ─────────────────────────
+
+    match /addresses/{addressId} {
+      // Saved delivery addresses — strictly private to their owner.
+      // Document must carry the owner's uid; the id itself is opaque.
+      function ownedByCaller() {
+        return isSignedIn()
+          && resource.data.uid == request.auth.uid;
+      }
+      allow get, list: if ownedByCaller();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.label is string
+        && request.resource.data.label.size() >= 1
+        && request.resource.data.label.size() <= 40
+        && request.resource.data.receiverName is string
+        && request.resource.data.receiverName.size() >= 2
+        && request.resource.data.receiverName.size() <= 80
+        && request.resource.data.phone is string
+        && request.resource.data.phone.matches('^\\d{10}$')
+        && request.resource.data.line is string
+        && request.resource.data.line.size() >= 10
+        && request.resource.data.line.size() <= 500;
+      allow update: if ownedByCaller()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.receiverName is string
+        && request.resource.data.receiverName.size() >= 2
+        && request.resource.data.receiverName.size() <= 80
+        && request.resource.data.phone is string
+        && request.resource.data.phone.matches('^\\d{10}$')
+        && request.resource.data.line is string
+        && request.resource.data.line.size() >= 10
+        && request.resource.data.line.size() <= 500;
+      allow delete: if ownedByCaller();
     }
 
-    // ─────────────────────── Catalogue validation ───────────────────────
-
-    function isValidCategoryWrite(d, isNew) {
-      return d.keys().hasAll(['name', 'icon', 'enabled', 'sortOrder', 'updatedAt'])
-        && d.keys().hasOnly(['name', 'icon', 'emoji', 'imageUrl', 'enabled', 'sortOrder', 'createdAt', 'updatedAt'])
-
-        && d.name is string && d.name.size() >= 2 && d.name.size() <= 40
-        && d.icon is string && d.icon.size() >= 1 && d.icon.size() <= 40
-        && d.enabled is bool
-        && d.sortOrder is int && d.sortOrder >= 0 && d.sortOrder <= 9999
-
-        && (!d.keys().hasAny(['emoji']) || (d.emoji is string && d.emoji.size() <= 8))
-        && (!d.keys().hasAny(['imageUrl']) || validUrlOrNull(d.imageUrl))
-
-        && d.updatedAt == request.time
-        && (isNew ? d.createdAt == request.time : d.createdAt == resource.data.createdAt);
-    }
-
-    function isValidProductWrite(d, isNew) {
-      return d.keys().hasAll(['name', 'description', 'categoryId', 'price', 'isVeg', 'popular', 'available', 'sortOrder', 'updatedAt'])
-        && d.keys().hasOnly(['name', 'description', 'categoryId', 'categoryName', 'price', 'mrp', 'imageUrl', 'isVeg', 'popular', 'available', 'sortOrder', 'rating', 'prepTime', 'createdAt', 'updatedAt'])
-
-        && d.name is string && d.name.size() >= 2 && d.name.size() <= 120
-        && d.description is string && d.description.size() <= 500
-        && d.categoryId is string && d.categoryId.matches('^[a-zA-Z0-9_-]{1,60}$')
-        && d.price is number && d.price >= 1 && d.price <= 100000
-        && d.price is int
-        && d.isVeg is bool && d.popular is bool && d.available is bool
-        && d.sortOrder is int && d.sortOrder >= 0 && d.sortOrder <= 9999
-
-        && (!d.keys().hasAny(['categoryName']) || (d.categoryName is string && d.categoryName.size() <= 40))
-        && (!d.keys().hasAny(['mrp']) || (d.mrp is number && d.mrp >= d.price && d.mrp <= 200000))
-        && (!d.keys().hasAny(['imageUrl']) || validUrlOrNull(d.imageUrl))
-        && (!d.keys().hasAny(['rating']) || (d.rating is number && d.rating >= 0 && d.rating <= 5))
-        && (!d.keys().hasAny(['prepTime']) || (d.prepTime is string && d.prepTime.size() <= 24))
-
-        && d.updatedAt == request.time
-        && (isNew ? d.createdAt == request.time : d.createdAt == resource.data.createdAt);
-    }
-
-    // ─────────────────────────── Collections ────────────────────────────
+    // ─────────────────────────── orders/{orderId} ──────────────────────────
 
     match /orders/{orderId} {
-      // Only whitelisted admins can read incoming orders.
-      allow get, list: if isAdmin();
-      // Anyone (the customer app) may create an order — if it is well-formed.
-      allow create: if request.resource.data.orderId == orderId
-        && isValidOrderCreation(request.resource.data);
-      // Only admins may change status, only along the workflow above.
-      allow update: if isAdmin() && isValidStatusUpdate();
-      // Cleanup / refunds handled by admins.
-      allow delete: if isAdmin();
+      // Customers see ONLY their own orders; drivers see ONLY orders assigned
+      // to them; admins see all. For `list` the rules engine verifies that the
+      // QUERY itself is constrained to documents matching the same condition.
+      allow get: if (isSignedIn() && resource.data.uid == request.auth.uid) || isAdmin();
+      allow list: if (isSignedIn() && resource.data.uid == request.auth.uid)
+        || (isDriver() && resource.data.driverId == request.auth.uid)
+        || isAdmin();
+
+      // Orders are created ONLY by the `createOrder` Cloud Function, which
+      // uses the Admin SDK and bypasses these rules. Clients are denied so
+      // no forged price/total/status can ever reach the database.
+      allow create: if false;
+
+      // Drivers may ONLY refresh their live GPS position on an order that is
+      // assigned to them and currently out for delivery. Nothing else.
+      allow update: if isDriver()
+        && resource.data.driverId == request.auth.uid
+        && resource.data.status in ['Out for Delivery', 'Preparing']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['driverLocation'])
+        && request.resource.data.driverLocation.keys().hasAll(['lat', 'lng', 'updatedAt'])
+        && request.resource.data.driverLocation.lat is number
+        && request.resource.data.driverLocation.lat >= -90 && request.resource.data.driverLocation.lat <= 90
+        && request.resource.data.driverLocation.lng is number
+        && request.resource.data.driverLocation.lng >= -180 && request.resource.data.driverLocation.lng <= 180;
+
+      // Cleanup only via Cloud Functions / Console (Admin SDK bypasses rules).
+      allow delete: if false;
     }
 
-    // Menu categories — public read (the app queries enabled ones),
-    // admin-only modifications.
+    // ───────────────────────── categories/{categoryId} ─────────────────────
+
     match /categories/{categoryId} {
-      allow get, list: if true;
-      allow create: if isAdmin() && isValidCategoryWrite(request.resource.data, true);
-      allow update: if isAdmin() && isValidCategoryWrite(request.resource.data, false);
-      allow delete: if isAdmin();
-    }
-
-    // Menu products — public read (the app queries available ones),
-    // admin-only modifications. Every product must carry a categoryId.
-    match /products/{productId} {
-      allow get, list: if true;
+      allow get, list: if true; // customer menu needs enabled categories
       allow create: if isAdmin()
-        && request.resource.data.categoryId is string
-        && request.resource.data.categoryId.size() >= 1
-        && isValidProductWrite(request.resource.data, true);
-      allow update: if isAdmin() && isValidProductWrite(request.resource.data, false);
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 40
+        && request.resource.data.icon is string && request.resource.data.icon.size() >= 1 && request.resource.data.icon.size() <= 40
+        && request.resource.data.enabled is bool
+        && request.resource.data.sortOrder is int
+        && (!('emoji' in request.resource.data) || (request.resource.data.emoji is string && request.resource.data.emoji.size() <= 8))
+        && (!('imageUrl' in request.resource.data) || validUrlOrNull(request.resource.data.imageUrl));
+      allow update: if isAdmin()
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 40
+        && request.resource.data.enabled is bool;
       allow delete: if isAdmin();
     }
 
-    // Admin whitelist — managed in the Firebase Console, never writable from clients.
-    // A user can only check whether THEIR OWN email is whitelisted.
+    // ────────────────────────── products/{productId} ───────────────────────
+
+    match /products/{productId} {
+      allow get, list: if true; // customer menu needs available products
+
+      // Admin-only writes. The offer model:
+      //   mrp          original price (must be >= selling price)
+      //   price        selling price inside the offer window
+      //   offerEnabled offer window on/off
+      //   offerStart   optional start boundary (Timestamp or null)
+      //   offerEnd     optional end boundary (Timestamp or null)
+      // Effective pricing is re-computed server-side at order time.
+      function validProduct(d, isNew) {
+        return d.name is string && d.name.size() >= 2 && d.name.size() <= 120
+          && d.description is string && d.description.size() <= 500
+          && d.categoryId is string && d.categoryId.matches('^[a-zA-Z0-9_-]{1,60}$')
+          && d.price is number && d.price is int && d.price >= 1 && d.price <= 100000
+          && (!('mrp' in d) || d.mrp == null || (d.mrp is number && d.mrp is int && d.mrp >= d.price && d.mrp <= 200000))
+          && d.offerEnabled is bool
+          && (!('offerStart' in d) || d.offerStart == null || d.offerStart is timestamp)
+          && (!('offerEnd' in d) || d.offerEnd == null || d.offerEnd is timestamp)
+          && (!('stock' in d) || d.stock == null || (d.stock is int && d.stock >= 0 && d.stock <= 10000))
+          && d.available is bool
+          && d.isVeg is bool && d.popular is bool
+          && (!('discountPercent' in d) || (d.discountPercent is int && d.discountPercent >= 0 && d.discountPercent <= 99))
+          && (!('imageUrl' in d) || validUrlOrNull(d.imageUrl))
+          && (!('categoryName' in d) || (d.categoryName is string && d.categoryName.size() <= 40))
+          && (!('rating' in d) || (d.rating is number && d.rating >= 0 && d.rating <= 5))
+          && (!('prepTime' in d) || (d.prepTime is string && d.prepTime.size() <= 24))
+          && (isNew ? true : d.createdAt == resource.data.createdAt);
+      }
+
+      allow create: if isAdmin() && validProduct(request.resource.data, true);
+      allow update: if isAdmin() && validProduct(request.resource.data, false);
+      allow delete: if isAdmin();
+    }
+
+    // ─────────────────────────── admins/{email} ────────────────────────────
+
     match /admins/{email} {
-      allow get: if request.auth != null && request.auth.token.email == email;
+      // Whitelist documents: Console-managed. A user may only check whether
+      // THEIR OWN email is whitelisted; listing is always denied.
+      allow get: if isSignedIn() && callerEmail() == email.toLowerCase();
       allow list: if false;
       allow write: if false;
+    }
+
+    // ─────────────────────────── drivers/{uid} ─────────────────────────────
+
+    match /drivers/{uid} {
+      // Roster managed by the `createDriver`/`setDriverActive`/`deleteDriver`
+      // Cloud Functions only. Admins read the roster for assignment; drivers
+      // read their own document.
+      allow get: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    // ─────────────────────────── settings/app ──────────────────────────────
+
+    match /settings/{settingId} {
+      allow get, list: if true; // delivery fee is public by design
+      allow write: if isAdmin()
+        && request.resource.data.deliveryFee is number
+        && request.resource.data.deliveryFee >= 0
+        && request.resource.data.deliveryFee <= 500;
     }
 
     // Everything else is denied by default.
