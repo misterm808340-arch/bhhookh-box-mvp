@@ -9,8 +9,8 @@ import {
   type DocumentData,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
 import { callableErrorMessage, getFirebase, isFirebaseConfigured } from "@/lib/firebase";
+import { callTrustedApi } from "@/lib/api";
 import {
   istDayKey,
   normalizeStatus,
@@ -237,27 +237,17 @@ export function useAdminOrders(
   }, [orders]);
 
   /**
-   * Persist a status change through the `updateOrderStatus` Cloud Function —
-   * Firestore rules DENY direct client writes to orders, the callable is the
-   * only path, and it validates the transition server-side.
+   * Persist a status change through the trusted backend — Firestore rules
+   * DENY direct client writes to orders, the API is the only path, and it
+   * re-verifies the admin role + transition server-side.
    */
   const updateOrderStatus = useCallback(async (order: Order, next: OrderStatus) => {
-    const { functions } = getFirebase();
-    const updateStatus = httpsCallable<{ orderId: string; status: string }, { ok: boolean }>(
-      functions,
-      "updateOrderStatus"
-    );
-    await updateStatus({ orderId: order.orderId, status: next });
+    await callTrustedApi("/api/orders/status", { orderId: order.orderId, status: next });
   }, []);
 
   /** Assign (or clear, with driverId = "") the delivery partner on an order. */
   const assignDriver = useCallback(async (orderId: string, driverId: string) => {
-    const { functions } = getFirebase();
-    const assign = httpsCallable<{ orderId: string; driverId: string }, { driverId: string | null; driverName: string | null }>(
-      functions,
-      "assignDriver"
-    );
-    await assign({ orderId, driverId });
+    await callTrustedApi("/api/orders/assign-driver", { orderId, driverId });
   }, []);
 
   return { orders, loading, error, stats, updateOrderStatus, assignDriver };

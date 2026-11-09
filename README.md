@@ -7,8 +7,8 @@ built as **two apps + one trusted backend** sharing **one Firebase project**
 | App | Stack | Role |
 | --- | --- | --- |
 | `customer-android/` | React Native + Expo (TypeScript, SDK 54) | Email login → live menu → cart → secure checkout → **real-time order tracking with live driver map** |
-| `admin-dashboard/` | Next.js 16 + TypeScript + Tailwind + shadcn | Orders (live feed + chime) · Menu & categories · **Drivers** · **Reports** |
-| `firebase/` | Firestore + Storage rules, **Cloud Functions v2** | The trusted backend: prices, discounts, stock, roles, order state machine |
+| `admin-dashboard/` | Next.js 16 + TypeScript + Tailwind + shadcn | Orders (live feed + chime) · Menu & categories · **Drivers** · **Reports** · **hosts the trusted backend API** |
+| `firebase/` | Firestore + Storage rules + indexes | Deny-by-default access for every collection |
 
 ```
 bhhookh-box-mvp/
@@ -20,10 +20,14 @@ bhhookh-box-mvp/
 │       │                    # Profile, MyOrders, OrderTracking (map!),
 │       │                    # Addresses, Reorder, DriverHome (GPS)
 │       ├── context/         # AuthContext (roles) · CartContext · CatalogContext
-│       ├── lib/             # firebase · auth · catalog · orders (callables)
-│       │                    # addresses · driver (GPS publisher)
+│       ├── lib/             # firebase · auth · catalog · orders (trusted API)
+│       │                    # addresses · api (backend client) · driver (GPS)
 │       └── components/      # FoodCard, CategoryGrid, CartBar, …
 ├── admin-dashboard/         # Next.js 16 App Router + Tailwind + shadcn
+│   ├── src/app/api/         # ★ TRUSTED BACKEND: 7 authenticated API routes
+│   │                        #   (orders create/cancel/status/assign-driver,
+│   │                        #    drivers create/set-active/delete) — Firebase
+│   │                        #    Admin SDK, service account in env only
 │   └── src/components/admin/
 │       ├── dashboard.tsx    # Tabs: Orders · Menu · Drivers · Reports
 │       ├── orders-board.tsx # Live feed, filters, status workflow, driver assign
@@ -36,6 +40,18 @@ bhhookh-box-mvp/
     ├── functions/           # Cloud Functions v2 — the trusted backend
     └── README.md            # ← FULL backend/deployment guide
 ```
+
+## What is new in v1.3.0 (vs v1.2.0)
+
+- **Spark-plan compatible backend** — Firebase's free Spark plan cannot run
+  Cloud Functions, so the trusted backend was ported to **7 authenticated
+  Next.js API routes** inside the admin dashboard (Firebase Admin SDK),
+  hosted free on Vercel. Identical security guarantees: server-verified
+  prices, immutable snapshots, role re-checks, state machine.
+- The customer app and the dashboard now call the backend over HTTPS with
+  Firebase ID tokens (`EXPO_PUBLIC_API_BASE_URL` / `NEXT_PUBLIC_API_BASE_URL`).
+- `firebase/functions/` remains as an optional Blaze-plan port — nothing
+  depends on it.
 
 ## What is new in v1.2.0 (vs v1.1.0)
 
@@ -68,22 +84,27 @@ Follow **`firebase/README.md` § One-time setup** — register the web app,
 enable Email/Password auth, create Firestore + Storage, create your admin
 user and the `admins/{email}` whitelist document.
 
-### 2. Deploy backend
+### 2. Deploy backend (works on the FREE Spark plan)
 
 ```bash
 cd firebase
 firebase login && firebase use --add
 firebase deploy --only firestore:rules,firestore:indexes,storage
-cd functions && npm install && npm run build && cd ..
-firebase deploy --only functions
 ```
+
+The trusted backend (order pricing/validation, driver accounts) ships inside
+the admin dashboard and deploys **free on Vercel** — see
+**`firebase/README.md` § Deploy the trusted backend** for the 10-minute
+click-by-click guide (service account key → Vercel import → env vars).
+Cloud Functions are NOT required (Spark cannot run them); an optional Blaze
+port lives in `firebase/functions/`.
 
 ### 3. Customer app
 
 ```bash
 cd customer-android
 npm install
-cp .env.example .env            # paste YOUR Firebase values
+cp .env.example .env            # paste YOUR Firebase values + the Vercel API URL
 npx expo start                  # scan with Expo Go, or press `a`
 ```
 
@@ -111,18 +132,29 @@ eas build -p android --profile preview    # installable APK
 Local build (Android SDK + JDK 17): see `customer-android/BUILD-RELEASE.md`
 (release keystore and signing properties are intentionally NOT committed).
 
-## Deploy the admin dashboard
+## Deploy the admin dashboard + trusted backend (Vercel — recommended)
 
-**GitHub Pages (current production):**
+The dashboard IS the backend: one free Vercel deployment serves both the UI
+and the authenticated `/api/*` ordering endpoints.
+
+```bash
+# 1. Vercel → Add New → Project → Import bhhookh-box-mvp
+# 2. Root Directory: admin-dashboard
+# 3. Env vars: NEXT_PUBLIC_FIREBASE_* (6) + FIREBASE_SERVICE_ACCOUNT
+# 4. Deploy
+```
+
+Full click-by-click guide: **`firebase/README.md` § Deploy the trusted
+backend** (free, works on the Spark plan).
+
+**GitHub Pages UI mirror (optional):** the static build cannot host the API,
+so point it at the Vercel backend when rebuilding:
 
 ```bash
 cd admin-dashboard
-npm run build:pages             # static export with basePath /bhhookh-box-admin
+NEXT_PUBLIC_API_BASE_URL=https://<your-app>.vercel.app npm run build:pages
 # commit/push the out/ build to the gh-pages branch of bhhookh-box-admin
 ```
-
-**Firebase Hosting alternative:** `NEXT_STATIC_EXPORT=1 npm run build` then
-`firebase deploy --only hosting` (see `firebase/README.md`).
 
 ## End-to-end test (the full loop)
 
@@ -145,13 +177,17 @@ Full deployment and testing guides: **`firebase/README.md`** and
 ## Security model
 
 - No password, API secret or service-account key exists in any source file —
-  Firebase web configs are public identifiers by design; **access control is
-  enforced by Firestore rules + Cloud Functions, never by the client**.
-- Orders are created/updated ONLY by Cloud Functions; customers can never
-  submit a price that the backend did not verify.
+  Firebase web configs are public identifiers by design; the service account
+  lives ONLY in the server's environment variables. **Access control is
+  enforced by Firestore rules + the trusted backend API, never by the client**.
+- Orders are created/updated ONLY by the trusted backend (`/api/*`, verified
+  with Firebase ID tokens + Admin SDK); customers can never submit a price
+  that the backend did not verify.
 - Admin = server-side check (custom claim or `admins/{email}` document) on
-  every callable and rule evaluation.
+  every API call and rule evaluation.
 - Drivers = `driver: true` claim + active `drivers/{uid}` doc, both created
-  by admin-only callables; they see only their assigned orders.
+  by admin-only API routes; they see only their assigned orders.
 - GPS is real device location (expo-location). No mock or fake coordinates
   exist anywhere in the codebase.
+- **Runs entirely on free tiers**: Firebase Spark + Vercel Hobby. No Cloud
+  Functions needed (optional Blaze port included in `firebase/functions/`).

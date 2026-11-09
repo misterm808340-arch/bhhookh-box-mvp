@@ -1,4 +1,4 @@
-# BHHOOKH BOX — Test Plan (v1.2.0)
+# BHHOOKH BOX — Test Plan (v1.3.0)
 
 Every test below was designed to run against the REAL Firebase project — no
 emulator required, no mock data. Work through it top-to-bottom after deploying
@@ -7,8 +7,11 @@ the backend (`firebase/README.md`).
 ## 0. Prerequisites
 
 - [ ] Firestore rules, indexes and Storage rules deployed.
-- [ ] Cloud Functions deployed (`firebase deploy --only functions`) — the
-      apps are NOT fully functional without them.
+- [ ] **Trusted backend deployed** — the admin dashboard + `/api/*` routes on
+      Vercel (free; see `firebase/README.md` § Deploy the trusted backend).
+      Verify: place a test order from the app (it goes through the server).
+      The apps are NOT fully functional without it.
+- [ ] `EXPO_PUBLIC_API_BASE_URL` set in `customer-android/.env` (the Vercel URL).
 - [ ] Admin user created (Auth + `admins/{email}` document with `role: "admin"`).
 - [ ] Dashboard → **Menu → Seed 9 categories** clicked; ≥1 product per test
       category exists with images and stock (leave one product with
@@ -111,7 +114,7 @@ the backend (`firebase/README.md`).
 ```bash
 cd customer-android  && npx tsc --noEmit        # must exit 0
 cd admin-dashboard   && npm run build           # TS errors now FAIL the build
-cd firebase/functions&& npm run build           # must exit 0
+cd firebase/functions&& npm run build           # optional Blaze port — must exit 0
 ```
 
 The admin build previously had `typescript.ignoreBuildErrors` — this was
@@ -125,7 +128,9 @@ Run from any authenticated client (e.g. a scratch page):
 | --- | --- |
 | Customer lists ALL orders (`collection(db,'orders')`) | Denied — query lacks `uid == auth.uid` constraint |
 | Customer reads another user's order by id | Denied (`get` requires `resource.data.uid == auth.uid`) |
-| Customer writes `products/`, `admins/`, `drivers/` | Denied (admin-only / CF-only) |
+| Customer writes `products/`, `admins/`, `drivers/` | Denied (admin-only / server-only) |
 | Driver updates `status` directly via `updateDoc` | Denied — only `driverLocation` on their own assigned order |
 | Driver reads `drivers/` list | Denied (admins only; drivers get their own doc) |
-| Anyone creates an order without a callable | Denied (`create: if false`) |
+| Anyone creates an order without the backend API | Denied (`create: if false`) |
+| `POST /api/orders/create` WITHOUT an Authorization header | 401 unauthenticated |
+| `POST /api/drivers/create` with a CUSTOMER's token | 403 — admin re-verified server-side |

@@ -11,9 +11,8 @@ import {
   where,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { getApp } from 'firebase/app';
-import { getFunctions, httpsCallable } from 'firebase/functions';
 import { getDb } from './firebase';
+import { callTrustedApi } from './api';
 import { mapOrderDoc } from './orders';
 import type { CustomerOrder } from '../types';
 
@@ -21,11 +20,13 @@ import type { CustomerOrder } from '../types';
  * Driver module (§9) — the trusted link between the restaurant and the map.
  *
  * - Driver identity is verified SERVER-SIDE: an account becomes a driver only
- *   when the `createDriver` Cloud Function (admin-only) creates `drivers/{uid}`
- *   and sets the `driver: true` custom claim. Nothing client-side can grant it.
+ *   when the admin-only trusted backend (`POST /api/drivers/create`) creates
+ *   `drivers/{uid}` and sets the `driver: true` custom claim. Nothing
+ *   client-side can grant it.
  * - Drivers read ONLY orders assigned to them (Firestore rules + constrained
- *   query below) and update status ONLY through the `updateOrderStatus`
- *   callable, which re-checks the assignment and the allowed transitions.
+ *   query below) and update status ONLY through the trusted backend
+ *   (`POST /api/orders/status`), which re-checks the assignment and the
+ *   allowed transitions.
  * - GPS is REAL device location from expo-location — published to
  *   `orders/{id}.driverLocation` while the order is being delivered. No fake
  *   or simulated coordinates exist anywhere in this codebase.
@@ -75,17 +76,12 @@ export function subscribeAssignedOrders(
 }
 
 /**
- * Driver status update — goes through the `updateOrderStatus` Cloud Function
- * which verifies the assignment and the driver state machine:
- *   Preparing → Out for Delivery → Delivered. Nothing else.
+ * Driver status update — goes through the trusted backend
+ * (`POST /api/orders/status`) which verifies the assignment and the driver
+ * state machine: Preparing → Out for Delivery → Delivered. Nothing else.
  */
 export async function setDriverOrderStatus(orderId: string, status: string): Promise<void> {
-  const functions = getFunctions(getApp());
-  const updateStatus = httpsCallable<{ orderId: string; status: string }, { ok: boolean }>(
-    functions,
-    'updateOrderStatus'
-  );
-  await updateStatus({ orderId, status });
+  await callTrustedApi('/api/orders/status', { orderId, status });
 }
 
 /**

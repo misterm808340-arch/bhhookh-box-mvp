@@ -9,15 +9,15 @@ import {
   type DocumentData,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
 import { getFirebase, isFirebaseConfigured } from "@/lib/firebase";
+import { callTrustedApi } from "@/lib/api";
 
 /**
  * Driver roster for the admin (§9) — live from Firestore; every mutation goes
- * through the admin-only Cloud Functions (`createDriver`, `setDriverActive`,
- * `deleteDriver`), which create/remove the Auth account and the `drivers/{uid}`
- * document with the `driver: true` custom claim. Clients can never write the
- * roster directly (Firestore rules deny it).
+ * through the admin-only trusted backend (`/api/drivers/...`), which
+ * creates/removes the Auth account and the `drivers/{uid}` document with the
+ * `driver: true` custom claim. Clients can never write the roster directly
+ * (Firestore rules deny it) and the admin role is re-verified server-side.
  */
 export interface DriverRow {
   uid: string;
@@ -75,34 +75,19 @@ export function useDrivers(enabled: boolean) {
   /** Creates a driver account (Auth user + drivers/{uid} + claim). */
   const createDriver = useCallback(
     async (input: { name: string; email: string; phone: string; password: string }) => {
-      const { functions } = getFirebase();
-      const create = httpsCallable<typeof input, { ok: boolean; driverId: string }>(
-        functions,
-        "createDriver"
-      );
-      await create(input);
+      await callTrustedApi("/api/drivers/create", { ...input });
     },
     []
   );
 
   /** Enables / disables a driver (disabled drivers cannot act on orders). */
   const setDriverActive = useCallback(async (driverId: string, active: boolean) => {
-    const { functions } = getFirebase();
-    const toggle = httpsCallable<{ driverId: string; active: boolean }, { ok: boolean }>(
-      functions,
-      "setDriverActive"
-    );
-    await toggle({ driverId, active });
+    await callTrustedApi("/api/drivers/set-active", { driverId, active });
   }, []);
 
   /** Permanently deletes the driver (Auth user + roster document). */
   const deleteDriver = useCallback(async (driverId: string) => {
-    const { functions } = getFirebase();
-    const remove = httpsCallable<{ driverId: string }, { ok: boolean }>(
-      functions,
-      "deleteDriver"
-    );
-    await remove({ driverId });
+    await callTrustedApi("/api/drivers/delete", { driverId });
   }, []);
 
   return { drivers, loading, error, createDriver, setDriverActive, deleteDriver };

@@ -1,7 +1,6 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
-import { getFunctions, type Functions } from "firebase/functions";
 
 /**
  * Firebase web configuration for the BHHOOKH BOX Admin Dashboard.
@@ -35,14 +34,12 @@ export function isFirebaseConfigured(): boolean {
 let app: FirebaseApp | null = null;
 let authInstance: Auth | null = null;
 let dbInstance: Firestore | null = null;
-let functionsInstance: Functions | null = null;
 
 /** Lazily initialise the shared Firebase app (no side effects at import time). */
 export function getFirebase(): {
   app: FirebaseApp;
   auth: Auth;
   db: Firestore;
-  functions: Functions;
 } {
   if (!isFirebaseConfigured()) {
     throw new Error(
@@ -53,9 +50,8 @@ export function getFirebase(): {
     app = getApps().length > 0 ? getApps()[0]! : initializeApp(firebaseConfig);
     authInstance = getAuth(app);
     dbInstance = getFirestore(app);
-    functionsInstance = getFunctions(app); // default region us-central1
   }
-  return { app, auth: authInstance!, db: dbInstance!, functions: functionsInstance! };
+  return { app, auth: authInstance!, db: dbInstance! };
 }
 
 /** Human-readable message for a callable-function failure. */

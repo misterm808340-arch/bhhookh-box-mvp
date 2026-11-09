@@ -1,6 +1,6 @@
 {
   "name": "bhhookh-box-admin",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "private": true,
   "description": "BHHOOKH BOX \u2014 Admin dashboard (Next.js + Firebase) for the food delivery MVP",
   "scripts": {
@@ -44,6 +44,7 @@
     "cmdk": "^1.1.1",
     "embla-carousel-react": "^8.6.0",
     "firebase": "^13.2.0",
+    "firebase-admin": "^13.6.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.525.0",
     "next": "^16.1.1",

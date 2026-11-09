@@ -26,7 +26,10 @@ export function ConfigErrorScreen({ message }: { message: string }) {
             2. Project settings → General → Your apps → copy the Web app config.
           </Text>
           <Text style={styles.step}>3. Paste the values into the .env file (see .env.example).</Text>
-          <Text style={styles.step}>4. Save the file and restart the app.</Text>
+          <Text style={styles.step}>
+            4. Set EXPO_PUBLIC_API_BASE_URL to the backend URL (Vercel app — see README).
+          </Text>
+          <Text style={styles.step}>5. Save the file and restart the app.</Text>
         </View>
       </ScrollView>
     </SafeAreaView>

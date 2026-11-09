@@ -9,9 +9,8 @@ import {
   where,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { getApp } from 'firebase/app';
-import { getFunctions, httpsCallable } from 'firebase/functions';
 import { getDb } from './firebase';
+import { ApiRequestError, callTrustedApi } from './api';
 import {
   DELIVERY_FEE,
   MAX_ADDRESS_LENGTH,
@@ -26,10 +25,11 @@ import { normalizeOrderStatus, type CustomerOrder, type OrderStatus } from '../t
  * Customer order API (§7/§8).
  *
  * SECURITY (§12): the client NEVER writes an order document directly and
- * NEVER submits a price. `placeOrder` calls the `createOrder` Cloud Function
- * with only product ids + quantities + an address; the trusted backend
- * re-reads every product from Firestore, validates prices/discounts/stock,
- * computes the totals and writes an order with an immutable price snapshot.
+ * NEVER submits a price. `placeOrder` calls the trusted backend
+ * (`POST /api/orders/create`) with only product ids + quantities + an address;
+ * the server re-reads every product from Firestore, validates
+ * prices/discounts/stock, computes the totals and writes an order with an
+ * immutable price snapshot.
  *
  * Orders are streamed back in real time with onSnapshot for tracking (§8).
  */
@@ -124,19 +124,14 @@ interface CallableErrorShape {
   message?: string;
 }
 
-/** Maps Cloud Function errors to short human-friendly messages. */
+/** Maps trusted-API / network failures to short human-friendly messages. */
 export function friendlyOrderError(error: unknown): string {
-  const shape = (typeof error === 'object' && error !== null ? error : {}) as CallableErrorShape;
-  const code = shape.code ?? '';
-  const message = shape.message ?? '';
-  if (code.startsWith('functions/')) {
-    const detail = message.replace(/^.*?:\s*/, '').trim();
-    if (detail.length > 0 && detail.length <= 240) return detail;
-    if (code === 'functions/unauthenticated') return 'Please log in and try again.';
-    if (code === 'functions/permission-denied') return 'You are not allowed to place this order.';
-    if (code === 'functions/failed-precondition') return 'Your cart cannot be ordered right now.';
+  if (error instanceof ApiRequestError) {
+    return error.failure.message;
   }
-  if (code === 'functions/unavailable' || code.includes('network')) {
+  const shape = (typeof error === 'object' && error !== null ? error : {}) as CallableErrorShape;
+  const message = shape.message ?? '';
+  if (message.includes('network') || message.toLowerCase().includes('fetch')) {
     return 'We could not reach the kitchen. Please check your internet connection and try again.';
   }
   return 'We could not place your order. Please try again in a moment.';
@@ -154,17 +149,12 @@ export async function placeOrder(
   if (lines.length === 0) {
     throw new Error('Your cart is empty.');
   }
-  const functions = getFunctions(getApp());
-  const createOrder = httpsCallable<
-    {
-      items: Array<{ productId: string; quantity: number }>;
-      address: { label: string; receiverName: string; phone: string; line: string };
-      customerName?: string;
-    },
-    { orderId: string; subtotal: number; deliveryFee: number; total: number }
-  >(functions, 'createOrder');
-
-  const result = await createOrder({
+  const result = await callTrustedApi<{
+    orderId: string;
+    subtotal: number;
+    deliveryFee: number;
+    total: number;
+  }>('/api/orders/create', {
     items: lines.map((line) => ({ productId: line.item.id, quantity: line.quantity })),
     address: {
       label: (input.label ?? '').trim().slice(0, 40),
@@ -174,19 +164,19 @@ export async function placeOrder(
     },
     customerName: customerName?.trim() || undefined,
   });
-  return result.data;
+  return {
+    orderId: result.orderId,
+    subtotal: result.subtotal,
+    deliveryFee: result.deliveryFee,
+    total: result.total,
+  };
 }
 
 /* ─────────────────────────────── cancellation ───────────────────────────── */
 
 /** Cancels the customer's own order (allowed while Order Placed / Accepted). */
 export async function cancelMyOrder(orderId: string, reason: string): Promise<void> {
-  const functions = getFunctions(getApp());
-  const cancelOrder = httpsCallable<{ orderId: string; reason: string }, { ok: boolean }>(
-    functions,
-    'cancelOrder'
-  );
-  await cancelOrder({ orderId, reason });
+  await callTrustedApi('/api/orders/cancel', { orderId, reason });
 }
 
 /* ─────────────────────────── real-time subscriptions ────────────────────── */
