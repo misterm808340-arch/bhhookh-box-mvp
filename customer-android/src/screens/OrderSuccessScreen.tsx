@@ -41,7 +41,7 @@ export function OrderSuccessScreen({ navigation, route }: OrderSuccessScreenProp
         <View style={styles.statusRow}>
           <View style={styles.statusChip}>
             <View style={styles.statusDot} />
-            <Text style={styles.statusText}>Status: Pending</Text>
+            <Text style={styles.statusText}>Status: Order Placed</Text>
           </View>
         </View>
 
@@ -63,7 +63,17 @@ export function OrderSuccessScreen({ navigation, route }: OrderSuccessScreenProp
       </View>
 
       <View style={styles.footer}>
-        <PrimaryButton title={`Back to ${BRAND_NAME}`} onPress={() => navigation.popToTop()} />
+        <PrimaryButton
+          title="Track My Order"
+          onPress={() => navigation.replace('OrderTracking', { orderId })}
+        />
+        <Pressable
+          onPress={() => navigation.popToTop()}
+          style={styles.secondaryLink}
+          hitSlop={8}
+        >
+          <Text style={styles.secondaryLinkText}>Back to {BRAND_NAME}</Text>
+        </Pressable>
       </View>
     </SafeAreaView>
   );
@@ -93,6 +103,8 @@ const styles = StyleSheet.create({
   headerSpacer: {
     width: 24,
   },
+  secondaryLink: { alignItems: 'center', paddingVertical: 12 },
+  secondaryLinkText: { color: COLORS.limeDeep, fontWeight: '700', fontSize: 13.5 },
   body: {
     flex: 1,
     alignItems: 'center',

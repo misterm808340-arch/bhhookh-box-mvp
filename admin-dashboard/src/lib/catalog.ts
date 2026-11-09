@@ -6,12 +6,14 @@ import {
   getDocs,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
   writeBatch,
   type DocumentData,
   type QueryDocumentSnapshot,
-  type Timestamp,
+  type Timestamp as FsTimestamp,
 } from "firebase/firestore";
+import { getDownloadURL, getStorage, ref, uploadBytesResumable } from "firebase/storage";
 import { getFirebase } from "@/lib/firebase";
 
 /**
@@ -35,8 +37,8 @@ export interface Category {
   imageUrl: string;
   sortOrder: number;
   enabled: boolean;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: FsTimestamp | null;
+  updatedAt: FsTimestamp | null;
 }
 
 export interface Product {
@@ -45,8 +47,18 @@ export interface Product {
   description: string;
   categoryId: string;
   categoryName: string;
+  /** Selling price (₹) — what the customer pays while the offer is active. */
   price: number;
+  /** Original price before discount (₹) — null when no discount. */
   mrp: number | null;
+  /** Offer schedule: while ON, price applies inside the window, mrp outside. */
+  offerEnabled: boolean;
+  offerStart: FsTimestamp | null;
+  offerEnd: FsTimestamp | null;
+  /** Stock count — null means unlimited. Customers cannot order more. */
+  stock: number | null;
+  /** Auto-calculated % OFF while the offer is active (0 = none). */
+  discountPercent: number;
   imageUrl: string;
   isVeg: boolean;
   popular: boolean;
@@ -54,8 +66,8 @@ export interface Product {
   sortOrder: number;
   rating: number;
   prepTime: string;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: FsTimestamp | null;
+  updatedAt: FsTimestamp | null;
 }
 
 // ─────────────────────── Icon palette (Ionicons) ───────────────────────
@@ -103,9 +115,9 @@ export const STANDARD_CATEGORIES: { id: string; name: string; icon: string; emoj
 
 // ───────────────────────────── Mappers ─────────────────────────────
 
-const asTimestamp = (value: unknown): Timestamp | null =>
+const asTimestamp = (value: unknown): FsTimestamp | null =>
   typeof value === "object" && value !== null && "toDate" in value
-    ? (value as Timestamp)
+    ? (value as FsTimestamp)
     : null;
 
 const safeImageUrl = (value: unknown): string =>
@@ -140,6 +152,7 @@ export function mapProduct(snapshot: QueryDocumentSnapshot<DocumentData>): Produ
   if (!name || !Number.isFinite(price) || price < 1) return null;
   const mrp = Number(data.mrp);
   const rating = Number(data.rating);
+  const normalizedMrp = Number.isFinite(mrp) && mrp >= price ? Math.round(mrp) : null;
   return {
     id: snapshot.id,
     name,
@@ -147,7 +160,18 @@ export function mapProduct(snapshot: QueryDocumentSnapshot<DocumentData>): Produ
     categoryId: typeof data.categoryId === "string" ? data.categoryId : "",
     categoryName: typeof data.categoryName === "string" ? data.categoryName : "",
     price,
-    mrp: Number.isFinite(mrp) && mrp >= price ? Math.round(mrp) : null,
+    mrp: normalizedMrp,
+    offerEnabled: data.offerEnabled === true,
+    offerStart: asTimestamp(data.offerStart),
+    offerEnd: asTimestamp(data.offerEnd),
+    stock:
+      typeof data.stock === "number" && Number.isFinite(data.stock) && data.stock >= 0
+        ? Math.round(data.stock)
+        : null,
+    discountPercent:
+      Number.isFinite(Number(data.discountPercent)) && Number(data.discountPercent) > 0
+        ? Math.round(Number(data.discountPercent))
+        : (discountPercent(price, normalizedMrp) ?? 0),
     imageUrl: safeImageUrl(data.imageUrl),
     isVeg: data.isVeg !== false,
     popular: data.popular === true,
@@ -186,6 +210,13 @@ export interface ProductDraft {
   categoryName: string;
   price: number;
   mrp: number | null;
+  /** Offer window switch — while OFF the item always sells at `price`. */
+  offerEnabled: boolean;
+  /** datetime-local strings ("" = unbounded). Converted to Timestamps on save. */
+  offerStart: string;
+  offerEnd: string;
+  /** null = unlimited stock. */
+  stock: number | null;
   imageUrl: string;
   isVeg: boolean;
   popular: boolean;
@@ -217,6 +248,18 @@ export function validateProduct(draft: ProductDraft): string | null {
     return "Price must be between ₹1 and ₹1,00,000.";
   if (draft.mrp !== null && (draft.mrp < draft.price || draft.mrp > 200000))
     return "Original price (MRP) must be ≥ the selling price.";
+  if (draft.stock !== null && (!Number.isInteger(draft.stock) || draft.stock < 0 || draft.stock > 10000))
+    return "Stock must be a whole number between 0 and 10,000 (or empty for unlimited).";
+  if (draft.offerEnabled) {
+    const start = parseLocalDateTime(draft.offerStart);
+    const end = parseLocalDateTime(draft.offerEnd);
+    if (draft.offerStart && start === null) return "Offer start date is invalid.";
+    if (draft.offerEnd && end === null) return "Offer end date is invalid.";
+    if (start !== null && end !== null && end.getTime() <= start.getTime())
+      return "Offer end must be after the offer start.";
+    if (draft.mrp === null)
+      return "Offers need an original price (MRP) so the % OFF can be calculated.";
+  }
   if (draft.rating < 0 || draft.rating > 5) return "Rating must be between 0 and 5.";
   if (draft.prepTime.length > 24) return "Prep time must be at most 24 characters.";
   if (draft.imageUrl && !draft.imageUrl.startsWith("https://"))
@@ -282,12 +325,24 @@ export async function reassignProducts(fromCategoryId: string, toCategoryId: str
 
 export async function saveProduct(id: string | null, draft: ProductDraft): Promise<void> {
   const { db } = getFirebase();
+  const offerActive = draft.offerEnabled && draft.mrp !== null;
+  const start = parseLocalDateTime(draft.offerStart);
+  const end = parseLocalDateTime(draft.offerEnd);
   const payload: Record<string, unknown> = {
     name: draft.name.trim(),
     description: draft.description.trim(),
     categoryId: draft.categoryId,
     categoryName: draft.categoryName,
     price: Math.round(draft.price),
+    offerEnabled: offerActive,
+    offerStart: offerActive && start ? Timestamp.fromDate(start) : null,
+    offerEnd: offerActive && end ? Timestamp.fromDate(end) : null,
+    // Auto-calculated discount % (mrp vs selling price) — stored for the
+    // customer app and future sales reporting.
+    discountPercent:
+      draft.mrp !== null && draft.mrp > draft.price
+        ? Math.round(((draft.mrp - draft.price) / draft.mrp) * 100)
+        : 0,
     isVeg: draft.isVeg,
     popular: draft.popular,
     available: draft.available,
@@ -299,6 +354,8 @@ export async function saveProduct(id: string | null, draft: ProductDraft): Promi
   // Emptied optional fields must actually be REMOVED on edit, not left behind.
   if (draft.mrp !== null) payload.mrp = Math.round(draft.mrp);
   else if (id) payload.mrp = deleteField();
+  if (draft.stock !== null) payload.stock = Math.round(draft.stock);
+  else if (id) payload.stock = deleteField();
   if (draft.imageUrl.trim()) payload.imageUrl = draft.imageUrl.trim();
   else if (id) payload.imageUrl = deleteField();
 
@@ -371,4 +428,74 @@ function randomId(): string {
 export function discountPercent(price: number, mrp: number | null): number | null {
   if (mrp === null || mrp <= price) return null;
   return Math.round(((mrp - price) / mrp) * 100);
+}
+
+// ───────────────────────── Product image upload ─────────────────────────
+
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+
+/**
+ * Uploads a product image to Firebase Storage under products/ and returns its
+ * public download URL. Requires an admin custom claim (see the bootstrap
+ * script in the setup docs). Progress is reported 0–100.
+ */
+export function uploadProductImage(
+  file: File,
+  onProgress: (percent: number) => void
+): Promise<string> {
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    return Promise.reject(new Error("Please choose a JPG, PNG or WebP image."));
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    return Promise.reject(new Error("Image must be smaller than 5 MB."));
+  }
+  const { app } = getFirebase();
+  const storage = getStorage(app);
+  const extension = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-").slice(-60) || "image";
+  const path = `products/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}.${extension}`;
+  const imageRef = ref(storage, path);
+  const task = uploadBytesResumable(imageRef, file, { contentType: file.type });
+  return new Promise<string>((resolve, reject) => {
+    task.on(
+      "state_changed",
+      (snapshot) => {
+        const percent = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+        onProgress(percent);
+      },
+      (error) => {
+        if (error.code === "storage/unauthorized") {
+          reject(
+            new Error(
+              "Upload not authorised — run the admin bootstrap script once (sets the admin claim) and sign in again. See the setup docs."
+            )
+          );
+        } else {
+          reject(new Error(error.message));
+        }
+      },
+      async () => {
+        try {
+          resolve(await getDownloadURL(task.snapshot.ref));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error("Upload failed."));
+        }
+      }
+    );
+  });
+}
+
+/** Converts a datetime-local input value ("2026-01-01T09:30") to a Date. */
+export function parseLocalDateTime(value: string): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/** Converts a Firestore Timestamp to a datetime-local input value ("" if null). */
+export function timestampToInputValue(value: FsTimestamp | null): string {
+  if (!value) return "";
+  const date = value.toDate();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

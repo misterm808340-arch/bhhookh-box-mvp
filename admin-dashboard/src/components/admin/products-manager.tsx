@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Flame, Loader2, Pencil, Plus, Search, Trash2, Utensils } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { CalendarClock, Flame, ImagePlus, Loader2, Package, Pencil, Plus, Search, Trash2, Utensils } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -31,7 +31,9 @@ import {
   deleteProduct,
   discountPercent,
   saveProduct,
+  timestampToInputValue,
   toggleProduct,
+  uploadProductImage,
   validateProduct,
   type Category,
   type Product,
@@ -52,6 +54,10 @@ const EMPTY_DRAFT: ProductDraft = {
   categoryName: "",
   price: 0,
   mrp: null,
+  offerEnabled: false,
+  offerStart: "",
+  offerEnd: "",
+  stock: null,
   imageUrl: "",
   isVeg: true,
   popular: false,
@@ -71,6 +77,37 @@ export function ProductsManager({ categories, products, counts }: ProductsManage
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Image upload state (Firebase Storage §5)
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
+
+  /** Auto-calculated % OFF shown live while editing (§5). */
+  const draftDiscount = useMemo(() => {
+    if (draft.mrp === null || draft.mrp <= draft.price) return null;
+    return Math.round(((draft.mrp - draft.price) / draft.mrp) * 100);
+  }, [draft.mrp, draft.price]);
+
+  async function handlePickImage(file: File | undefined) {
+    if (!file) return;
+    setUploading(true);
+    setUploadPercent(0);
+    try {
+      const url = await uploadProductImage(file, setUploadPercent);
+      setDraft((d) => ({ ...d, imageUrl: url }));
+      toast({ title: "Image uploaded", description: "Remember to save the product." });
+    } catch (error) {
+      toast({
+        title: "Upload failed",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUploading(false);
+      setUploadPercent(0);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -104,6 +141,10 @@ export function ProductsManager({ categories, products, counts }: ProductsManage
       categoryName: product.categoryName,
       price: product.price,
       mrp: product.mrp,
+      offerEnabled: product.offerEnabled,
+      offerStart: timestampToInputValue(product.offerStart),
+      offerEnd: timestampToInputValue(product.offerEnd),
+      stock: product.stock,
       imageUrl: product.imageUrl,
       isVeg: product.isVeg,
       popular: product.popular,
@@ -281,6 +322,25 @@ export function ProductsManager({ categories, products, counts }: ProductsManage
                         {off}% OFF
                       </span>
                     ) : null}
+                    {product.offerEnabled ? (
+                      <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                        <CalendarClock className="h-2.5 w-2.5" /> Offer
+                      </span>
+                    ) : null}
+                    {product.stock !== null ? (
+                      <span
+                        className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                          product.stock === 0
+                            ? "bg-red-100 text-red-700"
+                            : product.stock <= 5
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        <Package className="h-2.5 w-2.5" />
+                        {product.stock === 0 ? "Out of stock" : `${product.stock} left`}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="flex items-center justify-between mt-2">
                     <label className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
@@ -393,12 +453,129 @@ export function ProductsManager({ categories, products, counts }: ProductsManage
               </div>
             </div>
 
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-2">
+                <Label htmlFor="prod-stock">Stock (optional)</Label>
+                <Input
+                  id="prod-stock"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={draft.stock ?? ""}
+                  placeholder="empty = unlimited"
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    setDraft((d) => ({ ...d, stock: raw === "" ? null : Math.max(0, Math.round(Number(raw) || 0)) }));
+                  }}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label>Auto discount</Label>
+                <div className="flex h-9 items-center gap-2">
+                  {draftDiscount !== null ? (
+                    <span className="rounded-full bg-lime-brand px-2.5 py-1 text-xs font-bold text-brand-deep">
+                      {draftDiscount}% OFF · {formatINR(draft.price)} from {formatINR(draft.mrp ?? 0)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      Set MRP above the selling price to show a discount
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Offer schedule (§5) */}
+            <div className="grid gap-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+              <label className="flex items-center justify-between text-sm font-medium">
+                <span className="flex items-center gap-1.5">
+                  <CalendarClock className="h-4 w-4 text-amber-600" />
+                  Scheduled offer (sale window)
+                </span>
+                <Switch
+                  checked={draft.offerEnabled}
+                  onCheckedChange={(checked) => setDraft((d) => ({ ...d, offerEnabled: checked }))}
+                  aria-label="Enable scheduled offer"
+                />
+              </label>
+              {draft.offerEnabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="offer-start" className="text-xs">Offer starts</Label>
+                    <Input
+                      id="offer-start"
+                      type="datetime-local"
+                      value={draft.offerStart}
+                      onChange={(event) => setDraft((d) => ({ ...d, offerStart: event.target.value }))}
+                    />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="offer-end" className="text-xs">Offer ends</Label>
+                    <Input
+                      id="offer-end"
+                      type="datetime-local"
+                      value={draft.offerEnd}
+                      onChange={(event) => setDraft((d) => ({ ...d, offerEnd: event.target.value }))}
+                    />
+                  </div>
+                  <p className="col-span-2 text-[11px] leading-4 text-amber-700">
+                    Inside this window the item sells at the selling price with the discount badge.
+                    Outside it, the item reverts to the original price. Leave a field empty for an
+                    open-ended boundary.
+                  </p>
+                </div>
+              )}
+            </div>
+
             <div className="grid gap-2">
-              <Label htmlFor="prod-image">Image URL (optional)</Label>
+              <Label>Product image</Label>
+              <div className="flex items-center gap-3">
+                {draft.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={draft.imageUrl}
+                    alt="Product preview"
+                    className="h-16 w-16 rounded-lg border object-cover"
+                  />
+                ) : (
+                  <span className="h-16 w-16 rounded-lg border border-dashed bg-[#f6f9f6] flex items-center justify-center text-xl">
+                    🖼️
+                  </span>
+                )}
+                <div className="flex-1 space-y-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={(event) => void handlePickImage(event.target.files?.[0])}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    disabled={uploading}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    {uploading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ImagePlus className="h-4 w-4" />
+                    )}
+                    {uploading ? `Uploading… ${uploadPercent}%` : "Upload image"}
+                  </Button>
+                  {uploading && (
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div className="h-full bg-brand transition-all" style={{ width: `${uploadPercent}%` }} />
+                    </div>
+                  )}
+                </div>
+              </div>
               <Input
                 id="prod-image"
                 value={draft.imageUrl}
-                placeholder="https://…"
+                placeholder="…or paste an https:// image URL"
                 onChange={(event) => setDraft((d) => ({ ...d, imageUrl: event.target.value }))}
               />
             </div>

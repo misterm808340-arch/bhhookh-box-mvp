@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { BRAND_NAME, BRAND_TAGLINE } from '../config';
 import { useCatalog } from '../context/CatalogContext';
 import { useCart } from '../context/CartContext';
+import { useAuth } from '../context/AuthContext';
 import { SearchBar } from '../components/SearchBar';
 import { CategoryGrid } from '../components/CategoryGrid';
 import { FoodCard } from '../components/FoodCard';
@@ -20,6 +21,7 @@ type HomeScreenProps = NativeStackScreenProps<RootStackParamList, 'Home'>;
 export function HomeScreen({ navigation }: HomeScreenProps) {
   const { quantityOf, addItem, increment, decrement } = useCart();
   const { categories, products, loading, error } = useCatalog();
+  const { profile } = useAuth();
   const [search, setSearch] = useState('');
   /** null = All categories. */
   const [categoryId, setCategoryId] = useState<string | null>(null);
@@ -70,15 +72,28 @@ export function HomeScreen({ navigation }: HomeScreenProps) {
           <Text style={styles.brandName}>{BRAND_NAME}</Text>
           <Text style={styles.brandTagline}>{BRAND_TAGLINE}</Text>
         </View>
-        <Pressable
-          onPress={openCart}
-          hitSlop={10}
-          style={styles.cartButton}
-          accessibilityLabel="Open cart"
-        >
-          <Ionicons name="bag-handle-outline" size={22} color={COLORS.primary} />
-          <CartBadge />
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            onPress={() => navigation.navigate('Profile')}
+            hitSlop={10}
+            style={styles.accountButton}
+            accessibilityLabel="Open my account"
+          >
+            <Ionicons name="person-circle-outline" size={22} color={COLORS.primary} />
+            <Text numberOfLines={1} style={styles.accountName}>
+              {profile?.name ? profile.name.split(' ')[0] : 'Account'}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={openCart}
+            hitSlop={10}
+            style={styles.cartButton}
+            accessibilityLabel="Open cart"
+          >
+            <Ionicons name="bag-handle-outline" size={22} color={COLORS.primary} />
+            <CartBadge />
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView
@@ -235,6 +250,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.limeSoft,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  accountButton: {
+    height: 44,
+    maxWidth: 128,
+    borderRadius: 14,
+    borderWidth: 1.4,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.card,
+  },
+  accountName: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.primary,
   },
   badge: {
     position: 'absolute',

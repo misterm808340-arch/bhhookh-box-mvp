@@ -13,12 +13,21 @@ const FILTERS: Filter[] = ["All", ...ORDER_STATUSES];
 
 interface OrdersBoardProps {
   orders: Order[];
+  drivers: Array<{ uid: string; name: string; active: boolean }>;
   loading: boolean;
   error: string | null;
   onUpdateStatus: (order: Order, next: OrderStatus) => Promise<void>;
+  onAssignDriver: (orderId: string, driverId: string) => Promise<void>;
 }
 
-export function OrdersBoard({ orders, loading, error, onUpdateStatus }: OrdersBoardProps) {
+export function OrdersBoard({
+  orders,
+  drivers,
+  loading,
+  error,
+  onUpdateStatus,
+  onAssignDriver,
+}: OrdersBoardProps) {
   const [filter, setFilter] = useState<Filter>("All");
 
   const counts = useMemo(() => {
@@ -130,7 +139,13 @@ export function OrdersBoard({ orders, loading, error, onUpdateStatus }: OrdersBo
       ) : (
         <div className="space-y-4">
           {visible.map((order) => (
-            <OrderCard key={order.id} order={order} onUpdateStatus={onUpdateStatus} />
+            <OrderCard
+              key={order.id}
+              order={order}
+              drivers={drivers}
+              onUpdateStatus={onUpdateStatus}
+              onAssignDriver={onAssignDriver}
+            />
           ))}
         </div>
       )}

@@ -3,74 +3,116 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
-  doc,
   onSnapshot,
   orderBy,
   query,
-  serverTimestamp,
-  updateDoc,
   type DocumentData,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
-import { getFirebase, isFirebaseConfigured } from "@/lib/firebase";
-import { isOrderStatus, type Order, type OrderStatus } from "@/lib/orders";
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { callableErrorMessage, getFirebase, isFirebaseConfigured } from "@/lib/firebase";
+import {
+  istDayKey,
+  normalizeStatus,
+  type Order,
+  type OrderStatus,
+} from "@/lib/orders";
 
 export interface OrderStats {
   total: number;
-  pending: number;
+  orderPlaced: number;
   accepted: number;
   preparing: number;
   outForDelivery: number;
   delivered: number;
   rejected: number;
-  /** Sum of order totals excluding rejected orders. */
+  cancelled: number;
+  /** Sum of order totals excluding Rejected/Cancelled (§11: they are not sales). */
   totalValue: number;
+  /** Orders placed today (IST calendar day). */
+  todayOrders: number;
+  /** Sales of non-cancelled orders placed today (IST) (§11). */
+  todaySales: number;
 }
 
-/** Defensive mapping Firestore → Order (tolerates partially written docs). */
+const asTimestamp = (value: unknown) =>
+  typeof value === "object" && value !== null && "toDate" in value
+    ? (value as import("firebase/firestore").Timestamp)
+    : null;
+
+/** Defensive mapping Firestore → Order (tolerates legacy v1.0/v1.1 documents). */
 function mapOrder(snapshot: QueryDocumentSnapshot<DocumentData>): Order {
   const data = snapshot.data();
   const customer = (data.customer ?? {}) as Record<string, unknown>;
+  const rawAddress = (data.address ?? null) as Record<string, unknown> | null;
+
   const items = Array.isArray(data.items)
     ? data.items
         .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-        .map((item) => ({
-          name: String(item.name ?? "Item"),
-          price: Number(item.price ?? 0),
-          quantity: Number(item.quantity ?? 0),
-        }))
+        .map((item) => {
+          const quantity = Math.max(1, Math.round(Number(item.quantity ?? 1)));
+          const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
+          const mrp = typeof item.mrp === "number" ? item.mrp : null;
+          return {
+            productId: typeof item.productId === "string" ? item.productId : undefined,
+            name: String(item.name ?? "Item"),
+            unitPrice,
+            mrp,
+            discountPercent: Number(item.discountPercent ?? 0) || 0,
+            quantity,
+            lineTotal: Number(item.lineTotal ?? unitPrice * quantity),
+          };
+        })
     : [];
-  const asTimestamp = (value: unknown) =>
-    typeof value === "object" && value !== null && "toDate" in value
-      ? (value as import("firebase/firestore").Timestamp)
-      : null;
+
+  // Address: new object shape with the legacy customer.address string fallback.
+  const legacyAddress = String(customer.address ?? "");
+  const address = {
+    label: rawAddress ? String(rawAddress.label ?? "") : "",
+    receiverName: rawAddress
+      ? String(rawAddress.receiverName ?? "")
+      : String(customer.name ?? ""),
+    phone: rawAddress ? String(rawAddress.phone ?? "") : String(customer.phone ?? ""),
+    line: rawAddress ? String(rawAddress.line ?? "") : legacyAddress,
+  };
 
   return {
     id: snapshot.id,
     orderId: typeof data.orderId === "string" ? data.orderId : snapshot.id,
+    uid: typeof data.uid === "string" ? data.uid : null,
     customer: {
       name: String(customer.name ?? "Unknown"),
-      phone: String(customer.phone ?? "—"),
-      address: String(customer.address ?? "—"),
+      email: String(customer.email ?? ""),
+      phone: address.phone || String(customer.phone ?? ""),
     },
+    address,
     items,
     subtotal: Number(data.subtotal ?? 0),
     deliveryFee: Number(data.deliveryFee ?? 0),
     total: Number(data.total ?? 0),
     paymentMethod: typeof data.paymentMethod === "string" ? data.paymentMethod : "COD",
-    status: isOrderStatus(data.status) ? data.status : "Pending",
+    status: normalizeStatus(data.status),
+    driverId: typeof data.driverId === "string" ? data.driverId : null,
+    driverName: typeof data.driverName === "string" ? data.driverName : null,
+    statusHistory: Array.isArray(data.statusHistory)
+      ? data.statusHistory
+          .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+          .map((entry) => ({ status: String(entry.status ?? ""), at: asTimestamp(entry.at) }))
+      : [],
+    cancelReason: typeof data.cancelReason === "string" ? data.cancelReason : "",
     createdAt: asTimestamp(data.createdAt),
     updatedAt: asTimestamp(data.updatedAt),
   };
 }
 
 /**
- * Real-time orders feed via Firestore onSnapshot.
+ * Real-time orders feed via Firestore onSnapshot (§10) with trusted-backend
+ * mutations (§12): status changes and driver assignment go through the
+ * `updateOrderStatus` / `assignDriver` Cloud Functions, which re-verify the
+ * admin role and the state machine server-side.
  *
- * - Streams the `orders` collection, newest first.
- * - Fires onNewOrder for orders added AFTER the initial load, so a page
- *   refresh never replays old chimes; a 15-minute freshness window guards
- *   against clock/backfill edge cases.
+ * Fires onNewOrder for orders added AFTER the initial load, so a page refresh
+ * never replays old chimes.
  */
 export function useAdminOrders(
   enabled: boolean,
@@ -102,7 +144,7 @@ export function useAdminOrders(
           snapshot.docChanges().forEach((change) => {
             if (change.type === "added") {
               const order = mapOrder(change.doc);
-              if (order.status === "Pending") fresh.push(order);
+              if (order.status === "Order Placed") fresh.push(order);
             }
           });
         } else {
@@ -136,20 +178,30 @@ export function useAdminOrders(
   }, [enabled]);
 
   const stats = useMemo<OrderStats>(() => {
+    const nowKey = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      timeZone: "Asia/Kolkata",
+    }).format(new Date());
+
     const value: OrderStats = {
       total: orders.length,
-      pending: 0,
+      orderPlaced: 0,
       accepted: 0,
       preparing: 0,
       outForDelivery: 0,
       delivered: 0,
       rejected: 0,
+      cancelled: 0,
       totalValue: 0,
+      todayOrders: 0,
+      todaySales: 0,
     };
     for (const order of orders) {
       switch (order.status) {
-        case "Pending":
-          value.pending += 1;
+        case "Order Placed":
+          value.orderPlaced += 1;
           break;
         case "Accepted":
           value.accepted += 1;
@@ -166,20 +218,47 @@ export function useAdminOrders(
         case "Rejected":
           value.rejected += 1;
           break;
+        case "Cancelled":
+          value.cancelled += 1;
+          break;
       }
-      if (order.status !== "Rejected") value.totalValue += order.total;
+      if (order.status !== "Rejected" && order.status !== "Cancelled") {
+        value.totalValue += order.total;
+      }
+      const createdKey = istDayKey(order.createdAt);
+      if (createdKey === nowKey) {
+        value.todayOrders += 1;
+        if (order.status !== "Rejected" && order.status !== "Cancelled") {
+          value.todaySales += order.total;
+        }
+      }
     }
     return value;
   }, [orders]);
 
-  /** Persist a status change to Firestore (validated again by security rules). */
+  /**
+   * Persist a status change through the `updateOrderStatus` Cloud Function —
+   * Firestore rules DENY direct client writes to orders, the callable is the
+   * only path, and it validates the transition server-side.
+   */
   const updateOrderStatus = useCallback(async (order: Order, next: OrderStatus) => {
-    const { db } = getFirebase();
-    await updateDoc(doc(db, "orders", order.id), {
-      status: next,
-      updatedAt: serverTimestamp(),
-    });
+    const { functions } = getFirebase();
+    const updateStatus = httpsCallable<{ orderId: string; status: string }, { ok: boolean }>(
+      functions,
+      "updateOrderStatus"
+    );
+    await updateStatus({ orderId: order.orderId, status: next });
   }, []);
 
-  return { orders, loading, error, stats, updateOrderStatus };
+  /** Assign (or clear, with driverId = "") the delivery partner on an order. */
+  const assignDriver = useCallback(async (orderId: string, driverId: string) => {
+    const { functions } = getFirebase();
+    const assign = httpsCallable<{ orderId: string; driverId: string }, { driverId: string | null; driverName: string | null }>(
+      functions,
+      "assignDriver"
+    );
+    await assign({ orderId, driverId });
+  }, []);
+
+  return { orders, loading, error, stats, updateOrderStatus, assignDriver };
 }

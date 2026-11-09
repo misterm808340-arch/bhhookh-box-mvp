@@ -14,9 +14,6 @@ const nextConfig: NextConfig = {
   output: process.env.NEXT_STATIC_EXPORT === "1" ? "export" : "standalone",
   basePath: process.env.NEXT_BASE_PATH || undefined,
   images: { unoptimized: true },
-  typescript: {
-    ignoreBuildErrors: true,
-  },
   reactStrictMode: false,
 };
 

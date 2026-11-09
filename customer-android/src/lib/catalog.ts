@@ -44,15 +44,51 @@ export function mapProduct(snapshot: QueryDocumentSnapshot<DocumentData>): FoodI
   const name = typeof data.name === 'string' ? data.name.trim() : '';
   const price = Math.round(Number(data.price));
   if (!name || !Number.isFinite(price) || price < 1) return null;
-  const mrp = Number(data.mrp);
+  const rawMrp = Number(data.mrp);
+  const mrp = Number.isFinite(rawMrp) && rawMrp >= price ? Math.round(rawMrp) : null;
   const rating = Number(data.rating);
   const categoryId = typeof data.categoryId === 'string' ? data.categoryId : '';
+
+  // Offer window — mirrors the Cloud Function's computePricing (§5/§7):
+  // while a scheduled offer is OFF-window, the item sells at its MRP.
+  const offerEnabled = data.offerEnabled === true;
+  const toMillis = (value: unknown): number | null => {
+    if (typeof value === 'object' && value !== null && 'toMillis' in value) {
+      try {
+        return (value as { toMillis: () => number }).toMillis();
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+  const offerStart = toMillis(data.offerStart);
+  const offerEnd = toMillis(data.offerEnd);
+  const now = Date.now();
+  const inWindow =
+    offerEnabled && (offerStart === null || now >= offerStart) && (offerEnd === null || now <= offerEnd);
+  const effectivePrice = offerEnabled && !inWindow ? (mrp ?? price) : price;
+  const discountPercent =
+    mrp !== null && mrp > price && effectivePrice === price
+      ? Math.round(((mrp - price) / mrp) * 100)
+      : 0;
+  const stock =
+    typeof data.stock === 'number' && Number.isFinite(data.stock) && data.stock >= 0
+      ? Math.round(data.stock)
+      : null;
+
   return {
     id: snapshot.id,
     name,
     description: typeof data.description === 'string' ? data.description : '',
     price,
-    mrp: Number.isFinite(mrp) && mrp >= price ? Math.round(mrp) : null,
+    mrp,
+    offerEnabled,
+    offerStart,
+    offerEnd,
+    effectivePrice,
+    discountPercent,
+    stock,
     categoryId,
     categoryName: typeof data.categoryName === 'string' ? data.categoryName : '',
     categoryIcon: typeof data.categoryIcon === 'string' ? data.categoryIcon : 'restaurant-outline',

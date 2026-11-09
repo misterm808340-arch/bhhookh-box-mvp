@@ -1,65 +1,108 @@
 import { Timestamp } from "firebase/firestore";
 
-/** All possible order statuses, in workflow order (Rejected is terminal). */
+/**
+ * BHHOOKH BOX order model (§8/§10) — the 7-status workflow:
+ *   Order Placed → Accepted → Preparing → Out for Delivery → Delivered
+ *   Order Placed → Rejected          (admin, before kitchen starts)
+ *   Order Placed / Accepted / Preparing → Cancelled (customer or admin)
+ * The legacy v1.1.0 status "Pending" is normalised to "Order Placed" on read.
+ */
 export const ORDER_STATUSES = [
-  "Pending",
+  "Order Placed",
   "Accepted",
   "Preparing",
   "Out for Delivery",
   "Delivered",
   "Rejected",
+  "Cancelled",
 ] as const;
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+/** Normalises the legacy "Pending" status (and trims) to the current model. */
+export function normalizeStatus(value: unknown): OrderStatus {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "Pending") return "Order Placed";
+  if ((ORDER_STATUSES as readonly string[]).includes(raw)) return raw as OrderStatus;
+  return "Order Placed";
+}
 
 export function isOrderStatus(value: unknown): value is OrderStatus {
   return typeof value === "string" && (ORDER_STATUSES as readonly string[]).includes(value);
 }
 
+/** One immutable item snapshot written by the `createOrder` Cloud Function. */
 export interface OrderItem {
+  productId?: string;
   name: string;
-  price: number;
+  /** Server-verified selling price per unit (legacy orders: `price`). */
+  unitPrice: number;
+  mrp: number | null;
+  discountPercent: number;
   quantity: number;
+  /** unitPrice × quantity (legacy orders: computed on read). */
+  lineTotal: number;
 }
 
-export interface OrderCustomer {
-  name: string;
+export interface OrderAddress {
+  label: string;
+  receiverName: string;
   phone: string;
-  address: string;
+  line: string;
+}
+
+export interface OrderStatusEvent {
+  status: string;
+  at: Timestamp | null;
 }
 
 export interface Order {
   /** Firestore document id (identical to the human readable orderId). */
   id: string;
   orderId: string;
-  customer: OrderCustomer;
+  /** Auth uid of the customer — null on legacy v1.0 orders. */
+  uid: string | null;
+  customer: {
+    name: string;
+    email: string;
+    phone: string;
+  };
+  address: OrderAddress;
   items: OrderItem[];
   subtotal: number;
   deliveryFee: number;
   total: number;
   paymentMethod: string;
   status: OrderStatus;
+  driverId: string | null;
+  driverName: string | null;
+  statusHistory: OrderStatusEvent[];
+  cancelReason: string;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
 
-/**
- * Allowed forward transitions. This mirrors the Firestore security rules,
- * which only permit these exact status changes plus Pending → Rejected.
- */
-export const STATUS_FLOW: Partial<Record<OrderStatus, OrderStatus>> = {
-  Pending: "Accepted",
+/** The single "next step" the admin usually wants for each status. */
+export const NEXT_ACTION: Partial<Record<OrderStatus, OrderStatus>> = {
+  "Order Placed": "Accepted",
   Accepted: "Preparing",
   Preparing: "Out for Delivery",
   "Out for Delivery": "Delivered",
 };
 
 export const NEXT_ACTION_LABEL: Partial<Record<OrderStatus, string>> = {
-  Pending: "Accept Order",
+  "Order Placed": "Accept Order",
   Accepted: "Start Preparing",
   Preparing: "Mark Out for Delivery",
   "Out for Delivery": "Mark Delivered",
 };
+
+/** Statuses for which a driver can be assigned (mirrors assignDriver). */
+export const ASSIGNABLE_STATUSES: OrderStatus[] = [
+  "Accepted",
+  "Preparing",
+  "Out for Delivery",
+];
 
 export function formatINR(amount: number): string {
   return new Intl.NumberFormat("en-IN", {
@@ -84,6 +127,23 @@ export function formatOrderTime(ts: Timestamp | null): string {
   return dateTimeFormatter.format(ts.toDate());
 }
 
+const dayFormatter = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: "Asia/Kolkata",
+});
+
+/** IST calendar-day key (YYYY-MM-DD) used for "today" aggregates (§11). */
+export function istDayKey(ts: Timestamp | null): string | null {
+  if (!ts) return null;
+  try {
+    return dayFormatter.format(ts.toDate());
+  } catch {
+    return null;
+  }
+}
+
 export function timeAgo(ts: Timestamp | null): string {
   if (!ts) return "just now";
   const diffMs = Date.now() - ts.toDate().getTime();
@@ -95,10 +155,10 @@ export function timeAgo(ts: Timestamp | null): string {
   return `${Math.floor(hours / 24)} d ago`;
 }
 
-/** Fresh = a Pending order placed within the last 10 minutes. */
+/** Fresh = a newly placed order from the last 10 minutes. */
 export function isFreshPending(order: Order, withinMs = 10 * 60 * 1000): boolean {
   return (
-    order.status === "Pending" &&
+    order.status === "Order Placed" &&
     order.createdAt !== null &&
     Date.now() - order.createdAt.toDate().getTime() < withinMs
   );

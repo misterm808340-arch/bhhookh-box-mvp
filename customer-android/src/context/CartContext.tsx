@@ -24,6 +24,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const addItem = useCallback((item: FoodItem) => {
     setLines((current) => {
       const existing = current.find((line) => line.item.id === item.id);
+      // Stock guard (§5): tracked products cannot be over-ordered.
+      if (item.stock !== null && (existing?.quantity ?? 0) >= item.stock) return current;
       if (existing) {
         return current.map((line) =>
           line.item.id === item.id ? { ...line, quantity: line.quantity + 1 } : line
@@ -35,9 +37,12 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const increment = useCallback((itemId: string) => {
     setLines((current) =>
-      current.map((line) =>
-        line.item.id === itemId ? { ...line, quantity: Math.min(line.quantity + 1, 50) } : line
-      )
+      current.map((line) => {
+        if (line.item.id !== itemId) return line;
+        // Stock guard (§5): never exceed the remaining inventory.
+        const cap = line.item.stock !== null ? Math.min(line.item.stock, 50) : 50;
+        return { ...line, quantity: Math.min(line.quantity + 1, cap) };
+      })
     );
   }, []);
 

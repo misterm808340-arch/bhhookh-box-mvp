@@ -20,7 +20,7 @@ export function CartLineRow({ line, onIncrement, onDecrement, onRemove }: CartLi
         <Text style={styles.name} numberOfLines={1}>
           {line.item.name}
         </Text>
-        <Text style={styles.unitPrice}>₹{line.item.price} each</Text>
+        <Text style={styles.unitPrice}>₹{line.item.effectivePrice} each</Text>
         <View style={styles.controls}>
           <QtyStepper
             quantity={line.quantity}
@@ -38,7 +38,7 @@ export function CartLineRow({ line, onIncrement, onDecrement, onRemove }: CartLi
           </Pressable>
         </View>
       </View>
-      <Text style={styles.lineTotal}>₹{line.item.price * line.quantity}</Text>
+      <Text style={styles.lineTotal}>₹{line.item.effectivePrice * line.quantity}</Text>
     </View>
   );
 }

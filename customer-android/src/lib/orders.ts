@@ -1,4 +1,16 @@
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDoc,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  type Unsubscribe,
+} from 'firebase/firestore';
+import { getApp } from 'firebase/app';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { getDb } from './firebase';
 import {
   DELIVERY_FEE,
@@ -8,13 +20,21 @@ import {
   MIN_NAME_LENGTH,
   PHONE_PATTERN,
 } from '../config';
-import type { CartLine, OrderItemPayload } from '../types';
+import { normalizeOrderStatus, type CustomerOrder, type OrderStatus } from '../types';
 
-export interface CheckoutInput {
-  name: string;
-  phone: string;
-  address: string;
-}
+/**
+ * Customer order API (§7/§8).
+ *
+ * SECURITY (§12): the client NEVER writes an order document directly and
+ * NEVER submits a price. `placeOrder` calls the `createOrder` Cloud Function
+ * with only product ids + quantities + an address; the trusted backend
+ * re-reads every product from Firestore, validates prices/discounts/stock,
+ * computes the totals and writes an order with an immutable price snapshot.
+ *
+ * Orders are streamed back in real time with onSnapshot for tracking (§8).
+ */
+
+/* ─────────────────────────────── totals (display) ───────────────────────── */
 
 export interface Totals {
   subtotal: number;
@@ -23,24 +43,38 @@ export interface Totals {
   itemCount: number;
 }
 
-/**
- * Generates a human-friendly, unique order id such as "BHB-M3XK9A2-7QD".
- * The same string is used as the Firestore document id, so support staff can
- * find any order by its id.
- */
-export function generateOrderId(): string {
-  const timePart = Date.now().toString(36).toUpperCase();
-  const randomPart =
-    Math.random().toString(36).slice(2, 5).toUpperCase().replace(/[^A-Z0-9]/g, 'X') || 'ZZ9';
-  return `BHB-${timePart}-${randomPart}`;
+export function computeTotals(
+  lines: Array<{ item: { effectivePrice: number }; quantity: number }>,
+  deliveryFee: number = DELIVERY_FEE
+): Totals {
+  const subtotal = lines.reduce(
+    (sum, line) => sum + line.item.effectivePrice * line.quantity,
+    0
+  );
+  const fee = lines.length > 0 ? deliveryFee : 0;
+  const itemCount = lines.reduce((sum, line) => sum + line.quantity, 0);
+  return { subtotal, deliveryFee: fee, total: subtotal + fee, itemCount };
 }
 
-export function computeTotals(lines: CartLine[]): Totals {
-  const subtotal = lines.reduce((sum, line) => sum + line.item.price * line.quantity, 0);
-  const deliveryFee = lines.length > 0 ? DELIVERY_FEE : 0;
-  const itemCount = lines.reduce((sum, line) => sum + line.quantity, 0);
-  return { subtotal, deliveryFee, total: subtotal + deliveryFee, itemCount };
+/* ───────────────────────────── delivery fee (live) ──────────────────────── */
+
+/**
+ * Reads the admin-configured flat delivery fee (`settings/app.deliveryFee`).
+ * Falls back to the bundled default when the document is missing — the
+ * authoritative value is always the one the Cloud Function charges.
+ */
+export async function fetchDeliveryFee(): Promise<number> {
+  try {
+    const snapshot = await getDoc(doc(getDb(), 'settings', 'app'));
+    const value = Number(snapshot.data()?.deliveryFee);
+    if (Number.isFinite(value) && value >= 0 && value <= 500) return Math.round(value);
+  } catch {
+    // fall through to the default
+  }
+  return DELIVERY_FEE;
 }
+
+/* ─────────────────────────────── place order ────────────────────────────── */
 
 export interface CheckoutErrors {
   name?: string;
@@ -48,7 +82,7 @@ export interface CheckoutErrors {
   address?: string;
 }
 
-/** Client-side mirror of the Firestore security rules validation. */
+/** Client-side mirror of the Cloud Function input validation (§7). */
 export function validateCheckout(input: CheckoutInput): CheckoutErrors {
   const errors: CheckoutErrors = {};
   const name = input.name.trim();
@@ -56,96 +90,261 @@ export function validateCheckout(input: CheckoutInput): CheckoutErrors {
   const address = input.address.trim();
 
   if (name.length < MIN_NAME_LENGTH || name.length > MAX_NAME_LENGTH) {
-    errors.name = 'Please enter your full name (2–80 characters).';
+    errors.name = 'Please enter the receiver’s full name (2–80 characters).';
   }
   if (!PHONE_PATTERN.test(phone)) {
     errors.phone = 'Please enter a valid 10-digit mobile number.';
   }
   if (address.length < MIN_ADDRESS_LENGTH || address.length > MAX_ADDRESS_LENGTH) {
-    errors.address = 'Please enter your complete delivery address (at least 10 characters).';
+    errors.address = 'Please enter the complete delivery address (at least 10 characters).';
   }
   return errors;
 }
 
-/**
- * Thrown when a cart item fails re-validation against Firestore at checkout
- * (product deleted, marked unavailable, or its price changed).
- */
-export class OrderValidationError extends Error {}
+export interface CheckoutInput {
+  /** Receiver name (pre-filled from the profile, editable). */
+  name: string;
+  /** 10-digit mobile. */
+  phone: string;
+  /** Complete delivery address line. */
+  address: string;
+  /** Optional saved-address label (e.g. "Home"). */
+  label?: string;
+}
+
+export interface PlacedOrder {
+  orderId: string;
+  subtotal: number;
+  deliveryFee: number;
+  total: number;
+}
+
+interface CallableErrorShape {
+  code?: string;
+  message?: string;
+}
+
+/** Maps Cloud Function errors to short human-friendly messages. */
+export function friendlyOrderError(error: unknown): string {
+  const shape = (typeof error === 'object' && error !== null ? error : {}) as CallableErrorShape;
+  const code = shape.code ?? '';
+  const message = shape.message ?? '';
+  if (code.startsWith('functions/')) {
+    const detail = message.replace(/^.*?:\s*/, '').trim();
+    if (detail.length > 0 && detail.length <= 240) return detail;
+    if (code === 'functions/unauthenticated') return 'Please log in and try again.';
+    if (code === 'functions/permission-denied') return 'You are not allowed to place this order.';
+    if (code === 'functions/failed-precondition') return 'Your cart cannot be ordered right now.';
+  }
+  if (code === 'functions/unavailable' || code.includes('network')) {
+    return 'We could not reach the kitchen. Please check your internet connection and try again.';
+  }
+  return 'We could not place your order. Please try again in a moment.';
+}
 
 /**
- * Writes the order to Firestore.
- *
- * Document shape (collection: `orders`) — identical to the schema consumed
- * by the admin dashboard and validated by firestore.rules:
- *
- * {
- *   orderId, customer: { name, phone, address },
- *   items: [{ productId?, name, price, quantity }],
- *   subtotal, deliveryFee, total,
- *   paymentMethod: 'COD', status: 'Pending', createdAt: serverTimestamp
- * }
- *
- * Trusted-data validation before order creation: every cart line is
- * re-read from Firestore (the trusted source — only admins can write
- * products) and the payload is rebuilt from the FRESH price and
- * availability. Stale carts, deleted products and items switched to
- * unavailable are rejected here, before anything is written.
+ * Secure order creation — prices come from the SERVER, never from the app.
+ * The cart only contributes product ids and quantities.
  */
-export async function placeOrder(input: CheckoutInput, lines: CartLine[]): Promise<string> {
+export async function placeOrder(
+  input: CheckoutInput,
+  lines: Array<{ item: { id: string }; quantity: number }>,
+  customerName?: string
+): Promise<PlacedOrder> {
   if (lines.length === 0) {
     throw new Error('Your cart is empty.');
   }
-  const db = getDb();
-
-  const items: OrderItemPayload[] = [];
-  for (const line of lines) {
-    const snapshot = await getDoc(doc(db, 'products', line.item.id));
-    if (!snapshot.exists()) {
-      throw new OrderValidationError(
-        `"${line.item.name}" is no longer on the menu. Please remove it from your cart.`
-      );
-    }
-    const data = snapshot.data();
-    if (data.available !== true) {
-      throw new OrderValidationError(
-        `"${line.item.name}" is currently unavailable. Please remove it from your cart.`
-      );
-    }
-    const freshPrice = Math.round(Number(data.price));
-    if (!Number.isFinite(freshPrice) || freshPrice < 1) {
-      throw new OrderValidationError(
-        `"${line.item.name}" has an invalid price right now. Please try again later.`
-      );
-    }
-    items.push({
-      productId: line.item.id,
-      name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : line.item.name,
-      price: freshPrice,
-      quantity: line.quantity,
-    });
-  }
-
-  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const deliveryFee = DELIVERY_FEE;
-  const total = subtotal + deliveryFee;
-  const orderId = generateOrderId();
-
-  await setDoc(doc(db, 'orders', orderId), {
-    orderId,
-    customer: {
-      name: input.name.trim(),
-      phone: input.phone.trim(),
-      address: input.address.trim(),
+  const functions = getFunctions(getApp());
+  const createOrder = httpsCallable<
+    {
+      items: Array<{ productId: string; quantity: number }>;
+      address: { label: string; receiverName: string; phone: string; line: string };
+      customerName?: string;
     },
-    items,
-    subtotal,
-    deliveryFee,
-    total,
-    paymentMethod: 'COD',
-    status: 'Pending',
-    createdAt: serverTimestamp(),
-  });
+    { orderId: string; subtotal: number; deliveryFee: number; total: number }
+  >(functions, 'createOrder');
 
-  return orderId;
+  const result = await createOrder({
+    items: lines.map((line) => ({ productId: line.item.id, quantity: line.quantity })),
+    address: {
+      label: (input.label ?? '').trim().slice(0, 40),
+      receiverName: input.name.trim(),
+      phone: input.phone.trim(),
+      line: input.address.trim(),
+    },
+    customerName: customerName?.trim() || undefined,
+  });
+  return result.data;
+}
+
+/* ─────────────────────────────── cancellation ───────────────────────────── */
+
+/** Cancels the customer's own order (allowed while Order Placed / Accepted). */
+export async function cancelMyOrder(orderId: string, reason: string): Promise<void> {
+  const functions = getFunctions(getApp());
+  const cancelOrder = httpsCallable<{ orderId: string; reason: string }, { ok: boolean }>(
+    functions,
+    'cancelOrder'
+  );
+  await cancelOrder({ orderId, reason });
+}
+
+/* ─────────────────────────── real-time subscriptions ────────────────────── */
+
+function asMillis(value: unknown): number | null {
+  if (typeof value === 'object' && value !== null && 'toMillis' in value) {
+    try {
+      return (value as { toMillis: () => number }).toMillis();
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'number') return value;
+  return null;
+}
+
+interface OrderItemSnapshot {
+  productId: string;
+  name: string;
+  unitPrice: number;
+  mrp: number | null;
+  discountPercent: number;
+  quantity: number;
+  lineTotal: number;
+  imageUrl: string;
+}
+
+/** Tolerant Firestore → CustomerOrder mapping (also understands legacy docs). */
+export function mapOrderDoc(id: string, data: Record<string, unknown>): CustomerOrder {
+  // Items: new snapshot shape (unitPrice/lineTotal) with legacy fallbacks.
+  const rawItems = Array.isArray(data.items) ? data.items : [];
+  const items: OrderItemSnapshot[] = rawItems
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => {
+      const quantity = Math.max(1, Math.round(Number(item.quantity ?? 1)));
+      const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
+      return {
+        productId: typeof item.productId === 'string' ? item.productId : '',
+        name: String(item.name ?? 'Item'),
+        unitPrice,
+        mrp: typeof item.mrp === 'number' ? item.mrp : null,
+        discountPercent: Number(item.discountPercent ?? 0) || 0,
+        quantity,
+        lineTotal: Number(item.lineTotal ?? unitPrice * quantity),
+        imageUrl: typeof item.imageUrl === 'string' ? item.imageUrl : '',
+      };
+    });
+
+  // Address: new object shape with legacy string fallback.
+  const rawAddress = data.address;
+  const address =
+    typeof rawAddress === 'object' && rawAddress !== null
+      ? (rawAddress as Record<string, unknown>)
+      : {};
+  const legacyAddress = typeof data.customer === 'object' && data.customer !== null
+    ? String((data.customer as Record<string, unknown>).address ?? '')
+    : '';
+  const line =
+    typeof address.line === 'string' && address.line ? address.line : legacyAddress;
+
+  // Driver location (§9) — written by the driver's device while delivering.
+  const rawLocation = data.driverLocation;
+  const driverLocation =
+    typeof rawLocation === 'object' && rawLocation !== null
+      ? (rawLocation as Record<string, unknown>)
+      : null;
+
+  return {
+    id,
+    orderId: typeof data.orderId === 'string' ? data.orderId : id,
+    status: normalizeOrderStatus(String(data.status ?? 'Order Placed')),
+    items,
+    subtotal: Number(data.subtotal ?? 0),
+    deliveryFee: Number(data.deliveryFee ?? 0),
+    total: Number(data.total ?? 0),
+    paymentMethod: typeof data.paymentMethod === 'string' ? data.paymentMethod : 'COD',
+    address: {
+      label: typeof address.label === 'string' ? address.label : '',
+      receiverName:
+        typeof address.receiverName === 'string'
+          ? address.receiverName
+          : typeof data.customer === 'object' && data.customer !== null
+            ? String((data.customer as Record<string, unknown>).name ?? '')
+            : '',
+      phone:
+        typeof address.phone === 'string'
+          ? address.phone
+          : typeof data.customer === 'object' && data.customer !== null
+            ? String((data.customer as Record<string, unknown>).phone ?? '')
+            : '',
+      line,
+    },
+    driverId: typeof data.driverId === 'string' ? data.driverId : null,
+    driverName: typeof data.driverName === 'string' ? data.driverName : null,
+    driverLocation:
+      driverLocation &&
+      typeof driverLocation.lat === 'number' &&
+      typeof driverLocation.lng === 'number'
+        ? {
+            lat: driverLocation.lat,
+            lng: driverLocation.lng,
+            updatedAt: asMillis(driverLocation.updatedAt),
+          }
+        : null,
+    statusHistory: Array.isArray(data.statusHistory)
+      ? data.statusHistory
+          .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
+          .map((entry) => ({
+            status: normalizeOrderStatus(String(entry.status ?? '')),
+            at: asMillis(entry.at),
+          }))
+      : [],
+    cancelReason: typeof data.cancelReason === 'string' ? data.cancelReason : '',
+    createdAt: asMillis(data.createdAt),
+    updatedAt: asMillis(data.updatedAt),
+  };
+}
+
+/** Real-time feed of THIS customer's orders, newest first (§8). */
+export function subscribeMyOrders(
+  uid: string,
+  onData: (orders: CustomerOrder[]) => void,
+  onError: (error: Error) => void
+): Unsubscribe {
+  const ordersQuery = query(
+    collection(getDb(), 'orders'),
+    where('uid', '==', uid),
+    orderBy('createdAt', 'desc'),
+    limit(50)
+  );
+  return onSnapshot(
+    ordersQuery,
+    (snapshot) => onData(snapshot.docs.map((docSnapshot) => mapOrderDoc(docSnapshot.id, docSnapshot.data()))),
+    onError
+  );
+}
+
+/** Real-time tracking for ONE order (timeline + bill + driver location). */
+export function subscribeOrder(
+  orderId: string,
+  onData: (order: CustomerOrder | null) => void,
+  onError: (error: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    doc(getDb(), 'orders', orderId),
+    (snapshot) => onData(snapshot.exists() ? mapOrderDoc(snapshot.id, snapshot.data()) : null),
+    onError
+  );
+}
+
+/* ────────────────────────────── status helpers ──────────────────────────── */
+
+/** Statuses where the customer can still cancel (mirrors the Cloud Function). */
+export function canCancel(status: OrderStatus): boolean {
+  return status === 'Order Placed' || status === 'Accepted';
+}
+
+/** Statuses still in the kitchen / on the road (the "Active orders" tab). */
+export function isActiveStatus(status: OrderStatus): boolean {
+  return ['Order Placed', 'Accepted', 'Preparing', 'Out for Delivery'].includes(status);
 }

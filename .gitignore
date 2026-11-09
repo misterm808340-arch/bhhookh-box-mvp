@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment / secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+service-account*.json
+*-service-account*.json
+bhhookh-box-firebase-adminsdk-*.json
+
+# Build outputs
+admin-dashboard/out/
+.expo/
+dist/
+*.tsbuildinfo
+
+# Native build artifacts (android/ source IS committed, build outputs are not)
+android/app/build/
+android/build/
+android/.gradle/
+*.keystore
+!debug.keystore
+keystore.properties
+
+# OS / editor
+.DS_Store
+*.log
+
+# Cloud Functions build output
+firebase/functions/lib/

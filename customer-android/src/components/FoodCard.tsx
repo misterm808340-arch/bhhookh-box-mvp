@@ -4,8 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RADII } from '../theme';
 import { VegMark } from './PrimaryButton';
 import { QtyStepper } from './QtyStepper';
-import { FoodImage, safeIconName } from './FoodImage';
-import { discountPercent } from '../lib/catalog';
+import { FoodImage } from './FoodImage';
 import type { FoodItem } from '../types';
 
 interface FoodCardProps {
@@ -18,12 +17,14 @@ interface FoodCardProps {
 
 /** Menu list row: image on the left, details + price + add/stepper on the right. */
 export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: FoodCardProps) {
-  const off = discountPercent(item.price, item.mrp);
+  // Discount comes pre-computed from Firestore mapping (offer-window aware).
+  const off = item.discountPercent > 0 ? item.discountPercent : null;
+  const outOfStock = item.stock !== null && item.stock <= 0;
   return (
     <View style={styles.card}>
       <FoodImage
         uri={item.imageUrl}
-        icon={item.imageUrl ? item.categoryIcon : safeIconName(item.categoryIcon)}
+        icon={item.categoryIcon}
         style={styles.image}
         iconSize={30}
       />
@@ -47,7 +48,7 @@ export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: Fo
         </View>
         <View style={styles.bottomRow}>
           <View style={styles.priceRow}>
-            <Text style={styles.price}>₹{item.price}</Text>
+            <Text style={styles.price}>₹{item.effectivePrice}</Text>
             {off !== null ? (
               <>
                 <Text style={styles.mrp}>₹{item.mrp}</Text>
@@ -57,7 +58,11 @@ export function FoodCard({ item, quantity, onAdd, onIncrement, onDecrement }: Fo
               </>
             ) : null}
           </View>
-          {quantity === 0 ? (
+          {outOfStock ? (
+            <View style={styles.stockChip}>
+              <Text style={styles.stockText}>Out of stock</Text>
+            </View>
+          ) : quantity === 0 ? (
             <Pressable
               onPress={onAdd}
               hitSlop={8}
@@ -180,6 +185,19 @@ const styles = StyleSheet.create({
     borderRadius: RADII.sm,
     paddingHorizontal: 14,
     paddingVertical: 7,
+  },
+  stockChip: {
+    borderRadius: RADII.sm,
+    borderWidth: 1.4,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  stockText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: COLORS.textMuted,
   },
   addLabel: {
     fontSize: 13,

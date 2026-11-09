@@ -4,7 +4,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RADII } from '../theme';
 import { VegMark } from './PrimaryButton';
 import { FoodImage } from './FoodImage';
-import { discountPercent } from '../lib/catalog';
 import type { FoodItem } from '../types';
 
 interface PopularCardProps {
@@ -14,7 +13,7 @@ interface PopularCardProps {
 
 /** Horizontal "popular near you" card. */
 export function PopularCard({ item, onAdd }: PopularCardProps) {
-  const off = discountPercent(item.price, item.mrp);
+  const off = item.discountPercent > 0 ? item.discountPercent : null;
   return (
     <View style={styles.card}>
       <FoodImage uri={item.imageUrl} icon={item.categoryIcon} style={styles.image} iconSize={30} />
@@ -46,8 +45,8 @@ export function PopularCard({ item, onAdd }: PopularCardProps) {
           </Text>
         </View>
         <View style={styles.priceRow}>
-          <Text style={styles.price}>₹{item.price}</Text>
-          {item.mrp !== null ? <Text style={styles.mrp}>₹{item.mrp}</Text> : null}
+          <Text style={styles.price}>₹{item.effectivePrice}</Text>
+          {off !== null && item.mrp !== null ? <Text style={styles.mrp}>₹{item.mrp}</Text> : null}
         </View>
       </View>
     </View>
